@@ -231,3 +231,7 @@ MacOS Supported Now.
 Version 1.1.6 5-38-26
 
 Changed the file name for the loopback test from test_ to test_o_ to avoid collision with inputfile. Audio would not playback on the test loop for macOS as discovered by user. Keeping the identical version for this fix.
+
+Version 1.1.6 5-31-26
+
+Additional macos patch for Rosetta based errors on install
