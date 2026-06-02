@@ -235,3 +235,32 @@ Changed the file name for the loopback test from test_ to test_o_ to avoid colli
 Version 1.1.6 5-31-26
 
 Additional macos patch for Rosetta based errors on install
+
+Version 1.1.7 6-2-26
+
+Overwrite before delete toggle. New option 3 in Settings → Security → Overwrite Before Delete. 
+When enabled, every temporary file created during a call is overwritten with random data before it is removed from disk. 
+By default TerminalPhone uses the standard rm command, which unlinks the file from the directory but does not erase the actual bytes on the storage medium. The data remains recoverable with forensic tools until the OS reuses that disk space.
+
+How it works. The overwrite_rm() wrapper reads the file size, writes that many bytes from /dev/urandom over the file with dd using conv=notrunc so the write lands at the same logical location, flushes the write to the storage device with sync, and then deletes the file with rm. For directories, every file inside is overwritten recursively before the directory is removed. The wrapper is used on all temp file cleanup paths — PTT release, audio playback, call teardown, and app exit.
+
+Files that are overwritten:
+- Raw PCM audio recordings (your voice before encoding)
+- Opus-encoded audio files
+- Encrypted audio payloads and ciphertext fragments
+- Decrypted inbound audio and chat messages
+- Voice effect intermediary files
+- Runtime cipher and HMAC key material
+- Nonce logs (replay protection records)
+- Session flags, PID files, and named pipes
+- Tor hidden service keys (on address rotation)
+- Relay session data (in group bridge mode)
+
+Limitations. This is not a guaranteed secure erase. On SSDs and flash storage (most modern devices including phones), the drive's flash translation layer uses wear leveling, which means the overwrite may be written to different physical NAND cells. The original data can persist in old cells that the OS cannot address. Copy-on-write filesystems (ZFS, Btrfs, APFS) may also retain old data in snapshots. On traditional HDDs with spinning platters, the overwrite does replace the data at the same physical location and is effective against all software-based recovery. Full-disk encryption (FileVault, LUKS, Android FBE) is the only reliable defense on SSDs — this setting is a useful additional layer, not a replacement.
+
+Built-in test. Option 3 in the toggle menu runs a live demonstration. It creates a temporary file containing sample sensitive text, displays the original content in both plaintext and hex, overwrites it with /dev/urandom, displays the overwritten hex so the user can visually confirm the original data is gone, and then deletes the file. This is the same overwrite mechanism used during calls.
+
+Off by default. Standard rm deletion is used unless the user opts in. Adds minor latency to PTT release and call teardown as files are overwritten before removal.
+
+Dependency installer resilience on Ubuntu. Fixed an issue reported on Ubuntu 24.04 (Noble) where the dependency installer (option 7) would fail if the user had a broken or unsupported third-party PPA configured on their system. The reported case involved the nilarimogard/webupd8 PPA, which has no Release file for Noble — when apt-get update ran, it hit this broken PPA and returned a non-zero exit code, which aborted the entire install before any packages were installed. The script itself never adds this PPA; it was already present on the user's system from a previous unrelated install. The fix: apt-get update now runs with || true so that a failing third-party repository does not block the install. The standard Ubuntu repositories still update normally, and all of TerminalPhone's dependencies (tor, opus-tools, sox, socat, openssl, alsa-utils) are available in Ubuntu's default repos — no PPA is needed. The verification step after install still checks every dependency and reports any that are missing, so actual failures are not silently swallowed. This change applies to both the main dependency installer and the Snowflake installer.
+
