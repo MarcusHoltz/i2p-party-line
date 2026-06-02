@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.6"
+VERSION="1.1.7"
 BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -49,6 +49,7 @@ EXCLUDE_NODES=""      # Tor ExcludeNodes (comma-separated country codes, e.g. {U
 HMAC_AUTH=0           # HMAC-sign all protocol messages (off by default)
 SINGLE_HOP=0          # Single-hop hidden service (off by default, sacrifices server anonymity for speed)
 PTT_CHIME="off"       # PTT notification chime (off, tone, double, chirp, ding, click, custom)
+OVERWRITE_DELETE=0    # Overwrite temp files with random data before deletion (off by default)
 
 # Custom voice effect parameters (used when VOICE_EFFECT=custom)
 VOICE_PITCH=0         # Pitch shift in cents (-600 to +600, 0=off)
@@ -129,6 +130,51 @@ file_size() {
     fi
 }
 
+# Overwrite-before-delete wrapper — overwrites files with random data before
+# removal when OVERWRITE_DELETE=1. Falls back to standard rm otherwise.
+# Note: On SSDs, overwriting does not guarantee erasure of the original data
+# due to wear leveling. Full-disk encryption is the only reliable defense.
+# Usage: overwrite_rm [-r] file1 [file2 ...]
+overwrite_rm() {
+    local recursive=0
+    if [ "${1:-}" = "-r" ]; then
+        recursive=1
+        shift
+    fi
+
+    for target in "$@"; do
+        [ -e "$target" ] || continue
+
+        if [ "$OVERWRITE_DELETE" -eq 1 ] 2>/dev/null; then
+            if [ -d "$target" ]; then
+                # Recursively overwrite every file inside the directory
+                find "$target" -type f 2>/dev/null | while IFS= read -r _sr_f; do
+                    local _sr_sz
+                    _sr_sz=$(file_size "$_sr_f")
+                    if [ "$_sr_sz" -gt 0 ] 2>/dev/null; then
+                        dd if=/dev/urandom of="$_sr_f" bs="$_sr_sz" count=1 conv=notrunc 2>/dev/null || true
+                        sync "$_sr_f" 2>/dev/null || true
+                    fi
+                done
+            elif [ -f "$target" ]; then
+                local _sr_sz
+                _sr_sz=$(file_size "$target")
+                if [ "$_sr_sz" -gt 0 ] 2>/dev/null; then
+                    dd if=/dev/urandom of="$target" bs="$_sr_sz" count=1 conv=notrunc 2>/dev/null || true
+                    sync "$target" 2>/dev/null || true
+                fi
+            fi
+        fi
+
+        # Perform the actual deletion
+        if [ "$recursive" -eq 1 ] || [ -d "$target" ]; then
+            rm -rf "$target" 2>/dev/null || true
+        else
+            rm -f "$target" 2>/dev/null || true
+        fi
+    done
+}
+
 cleanup() {
     # Restore terminal
     if [ -n "$ORIGINAL_STTY" ]; then
@@ -140,8 +186,8 @@ cleanup() {
     kill_bg_processes
 
     # Remove temp files
-    rm -f "$PTT_FLAG" "$CONNECTED_FLAG" "$RECV_PIPE" "$SEND_PIPE"
-    rm -rf "$AUDIO_DIR" 2>/dev/null || true
+    overwrite_rm "$PTT_FLAG" "$CONNECTED_FLAG" "$RECV_PIPE" "$SEND_PIPE"
+    overwrite_rm -r "$AUDIO_DIR"
 
     echo -e "\n${GREEN}${APP_NAME} shut down cleanly.${NC}"
 }
@@ -163,7 +209,7 @@ kill_bg_processes() {
             pid=$(cat "$pidfile" 2>/dev/null) || continue
             kill "$pid" 2>/dev/null || true
         done
-        rm -f "$PID_DIR"/*.pid 2>/dev/null || true
+        overwrite_rm "$PID_DIR"/*.pid
     fi
 
     # Kill our Tor instance if running
@@ -284,6 +330,7 @@ EXCLUDE_NODES="$EXCLUDE_NODES"
 HMAC_AUTH=$HMAC_AUTH
 SINGLE_HOP=$SINGLE_HOP
 PTT_CHIME="$PTT_CHIME"
+OVERWRITE_DELETE=$OVERWRITE_DELETE
 EOF
 }
 
@@ -383,7 +430,7 @@ install_deps() {
         brew_run install $pkg_names_brew
     elif check_dep apt-get; then
         log_info "Detected apt package manager"
-        $SUDO apt-get update -qq
+        $SUDO apt-get update -qq || true
         $SUDO apt-get install -y $pkg_names_apt
     elif check_dep dnf; then
         log_info "Detected dnf package manager"
@@ -516,7 +563,7 @@ install_snowflake() {
     elif check_dep brew; then
         brew_run install snowflake
     elif check_dep apt-get; then
-        $SUDO apt-get update -qq
+        $SUDO apt-get update -qq || true
         $SUDO apt-get install -y snowflake-client
     elif check_dep dnf; then
         $SUDO dnf install -y snowflake-client
@@ -666,7 +713,7 @@ rotate_onion() {
         return
     fi
     stop_tor
-    rm -rf "$TOR_DIR/hidden_service"
+    overwrite_rm -r "$TOR_DIR/hidden_service"
     log_info "Old hidden service keys deleted"
     start_tor
 }
@@ -950,7 +997,7 @@ audio_record() {
 
     if [ $IS_TERMUX -eq 1 ]; then
         local tmp_rec="$AUDIO_DIR/tmrec_$(uid).tmp"
-        rm -f "$tmp_rec"
+        overwrite_rm "$tmp_rec"
         termux-microphone-record -l "$((duration + 1))" -f "$tmp_rec" &>/dev/null
         sleep "$duration"
         termux-microphone-record -q &>/dev/null || true
@@ -959,7 +1006,7 @@ audio_record() {
             ffmpeg -y -i "$tmp_rec" -f s16le -ar "$SAMPLE_RATE" -ac 1 \
                 "$outfile" &>/dev/null || log_warn "ffmpeg conversion failed"
         fi
-        rm -f "$tmp_rec"
+        overwrite_rm "$tmp_rec"
     elif [ $IS_MACOS -eq 1 ]; then
         rec -q -t raw -r "$SAMPLE_RATE" -e signed -b 16 -c 1 "$outfile" trim 0 "$duration" 2>/dev/null
     else
@@ -975,7 +1022,7 @@ start_recording() {
 
     if [ $IS_TERMUX -eq 1 ]; then
         REC_FILE="$AUDIO_DIR/msg_${_id}.tmp"
-        rm -f "$REC_FILE"
+        overwrite_rm "$REC_FILE"
         termux-microphone-record -l 120 -f "$REC_FILE" &>/dev/null &
         REC_PID=$!
     elif [ $IS_MACOS -eq 1 ]; then
@@ -1050,7 +1097,7 @@ stop_and_send() {
             ffmpeg -y -i "$REC_FILE" -f s16le -ar "$SAMPLE_RATE" -ac 1 \
                 "$raw_file" &>/dev/null || true
         fi
-        rm -f "$REC_FILE"
+        overwrite_rm "$REC_FILE"
     else
         kill "$REC_PID" 2>/dev/null || true
         wait "$REC_PID" 2>/dev/null || true
@@ -1066,7 +1113,7 @@ stop_and_send() {
         if apply_voice_effect "$raw_file" "$fx_file"; then
             mv "$fx_file" "$raw_file"
         else
-            rm -f "$fx_file" 2>/dev/null
+            overwrite_rm "$fx_file"
         fi
     fi
 
@@ -1093,7 +1140,7 @@ stop_and_send() {
             fi
         fi
     fi
-    rm -f "$raw_file" "$opus_file" "$enc_file" 2>/dev/null
+    overwrite_rm "$raw_file" "$opus_file" "$enc_file"
 }
 
 # Play audio (platform-aware)
@@ -1155,7 +1202,7 @@ cleanup_call() {
                 kill "$pid" 2>/dev/null || true
                 kill -9 "$pid" 2>/dev/null || true
             fi
-            rm -f "$pidfile"
+            overwrite_rm "$pidfile"
         fi
     done
 
@@ -1177,17 +1224,17 @@ cleanup_call() {
     fi
 
     # Remove all runtime files for this PID
-    rm -f "$PTT_FLAG" "$CONNECTED_FLAG"
-    rm -f "$RECV_PIPE" "$SEND_PIPE"
-    rm -f "$CIPHER_RUNTIME_FILE"
-    rm -f "$HMAC_RUNTIME_FILE"
-    rm -f "$NONCE_LOG_FILE"
-    rm -f "$DATA_DIR/run/remote_id_$$"
-    rm -f "$DATA_DIR/run/remote_cipher_$$"
-    rm -f "$DATA_DIR/run/relay_mode_$$"
-    rm -f "$DATA_DIR/run/group_count_$$"
-    rm -f "$DATA_DIR/run/incoming_$$"
-    rm -f "$DATA_DIR/run/vol_ptt_trigger_$$"
+    overwrite_rm "$PTT_FLAG" "$CONNECTED_FLAG"
+    overwrite_rm "$RECV_PIPE" "$SEND_PIPE"
+    overwrite_rm "$CIPHER_RUNTIME_FILE"
+    overwrite_rm "$HMAC_RUNTIME_FILE"
+    overwrite_rm "$NONCE_LOG_FILE"
+    overwrite_rm "$DATA_DIR/run/remote_id_$$"
+    overwrite_rm "$DATA_DIR/run/remote_cipher_$$"
+    overwrite_rm "$DATA_DIR/run/relay_mode_$$"
+    overwrite_rm "$DATA_DIR/run/group_count_$$"
+    overwrite_rm "$DATA_DIR/run/incoming_$$"
+    overwrite_rm "$DATA_DIR/run/vol_ptt_trigger_$$"
 
     # Kill circuit refresh if active
     if [ -n "$CIRCUIT_REFRESH_PID" ]; then
@@ -1196,7 +1243,7 @@ cleanup_call() {
     fi
 
     # Clean temp audio files
-    rm -f "$AUDIO_DIR"/*.tmp 2>/dev/null || true
+    overwrite_rm "$AUDIO_DIR"/*.tmp
 
     # Reset state variables
     CALL_ACTIVE=0
@@ -1216,7 +1263,7 @@ start_auto_listener() {
     stop_auto_listener
 
     mkdir -p "$AUDIO_DIR" "$DATA_DIR/run"
-    rm -f "$RECV_PIPE" "$SEND_PIPE" "$AUTO_LISTEN_FLAG"
+    overwrite_rm "$RECV_PIPE" "$SEND_PIPE" "$AUTO_LISTEN_FLAG"
     mkfifo "$RECV_PIPE" "$SEND_PIPE"
 
     socat "TCP-LISTEN:$LISTEN_PORT,reuseaddr" \
@@ -1231,7 +1278,7 @@ stop_auto_listener() {
         kill -9 "$AUTO_LISTEN_PID" 2>/dev/null || true
         AUTO_LISTEN_PID=""
     fi
-    rm -f "$AUTO_LISTEN_FLAG" "$RECV_PIPE" "$SEND_PIPE"
+    overwrite_rm "$AUTO_LISTEN_FLAG" "$RECV_PIPE" "$SEND_PIPE"
 }
 
 #=============================================================================
@@ -1252,7 +1299,7 @@ start_vol_monitor() {
         return
     fi
 
-    rm -f "$trigger_file"
+    overwrite_rm "$trigger_file"
 
     (
         local last_vol=""
@@ -1315,13 +1362,13 @@ stop_vol_monitor() {
         kill -9 "$VOL_MON_PID" 2>/dev/null || true
         VOL_MON_PID=""
     fi
-    rm -f "$DATA_DIR/run/vol_ptt_trigger_$$"
+    overwrite_rm "$DATA_DIR/run/vol_ptt_trigger_$$"
 }
 
 # Check if an incoming call arrived on the background listener
 check_auto_listen() {
     if [ -f "$AUTO_LISTEN_FLAG" ]; then
-        rm -f "$AUTO_LISTEN_FLAG"
+        overwrite_rm "$AUTO_LISTEN_FLAG"
         touch "$CONNECTED_FLAG"
         echo -e "\n  ${GREEN}${BOLD}Incoming call detected!${NC}" >&2
         sleep 0.5
@@ -1357,11 +1404,11 @@ listen_for_call() {
     mkdir -p "$AUDIO_DIR"
     log_info "Waiting for incoming connection..."
 
-    rm -f "$RECV_PIPE" "$SEND_PIPE"
+    overwrite_rm "$RECV_PIPE" "$SEND_PIPE"
     mkfifo "$RECV_PIPE" "$SEND_PIPE"
 
     local incoming_flag="$DATA_DIR/run/incoming_$$"
-    rm -f "$incoming_flag"
+    overwrite_rm "$incoming_flag"
 
     socat "TCP-LISTEN:$LISTEN_PORT,reuseaddr" \
         "SYSTEM:touch $incoming_flag; cat $SEND_PIPE & cat > $RECV_PIPE" &
@@ -1371,7 +1418,7 @@ listen_for_call() {
     while [ ! -f "$incoming_flag" ]; do
         if ! kill -0 "$socat_pid" 2>/dev/null; then
             log_err "Listener stopped unexpectedly"
-            rm -f "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
+            overwrite_rm "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
             # Restart auto-listener if enabled
             start_auto_listener
             return 1
@@ -1384,7 +1431,7 @@ listen_for_call() {
                     # Stop all listening (manual + auto), return to menu
                     kill "$socat_pid" 2>/dev/null || true
                     wait "$socat_pid" 2>/dev/null || true
-                    rm -f "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
+                    overwrite_rm "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
                     stop_auto_listener
                     AUTO_LISTEN=0
                     save_config
@@ -1395,7 +1442,7 @@ listen_for_call() {
                     # Move to background: kill manual socat, enable auto-listen
                     kill "$socat_pid" 2>/dev/null || true
                     wait "$socat_pid" 2>/dev/null || true
-                    rm -f "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
+                    overwrite_rm "$RECV_PIPE" "$SEND_PIPE" "$incoming_flag"
                     AUTO_LISTEN=1
                     save_config
                     start_auto_listener
@@ -1449,7 +1496,7 @@ call_remote() {
     touch "$CONNECTED_FLAG"
 
     # Create named pipes
-    rm -f "$RECV_PIPE" "$SEND_PIPE"
+    overwrite_rm "$RECV_PIPE" "$SEND_PIPE"
     mkfifo "$RECV_PIPE" "$SEND_PIPE"
 
     # Connect via Tor SOCKS proxy using socat
@@ -1524,7 +1571,7 @@ relay_mode() {
 
     local relay_dir="$DATA_DIR/relay"
     mkdir -p "$relay_dir"
-    rm -f "$relay_dir"/* 2>/dev/null
+    overwrite_rm "$relay_dir"/*
 
     # Write per-connection handler script
     cat > "$relay_dir/handler.sh" << 'RELAY_HANDLER_EOF'
@@ -1605,7 +1652,7 @@ if [ -f "$RELAY_DIR/stats_${ID}" ]; then
         echo "$((_ti + ${_fi:-0})) $((_to + ${_fo:-0}))" > "$RELAY_DIR/stats_total"
     ) 9>"$RELAY_DIR/.stats_lock"
 fi
-rm -f "$OUTFIFO" "$RELAY_DIR/client_${ID}" "$RELAY_DIR/stats_${ID}"
+overwrite_rm "$OUTFIFO" "$RELAY_DIR/client_${ID}" "$RELAY_DIR/stats_${ID}"
 
 # Broadcast updated count (one fewer)
 broadcast_count
@@ -1692,7 +1739,7 @@ RELAY_HANDLER_EOF
     pkill -P "$socat_pid" 2>/dev/null
     wait "$socat_pid" 2>/dev/null
     # Remove any remaining FIFOs and markers
-    rm -rf "$relay_dir"
+    overwrite_rm -r "$relay_dir"
     log_ok "Relay stopped"
     sleep 1
 }
@@ -1884,13 +1931,13 @@ in_call_session() {
     local spinner_pid="${4:-}"
 
     CALL_ACTIVE=1
-    rm -f "$PTT_FLAG"
+    overwrite_rm "$PTT_FLAG"
     mkdir -p "$AUDIO_DIR"
 
     # Start volume-down double-tap monitor (Termux only)
     VOL_MON_PID=""
     local vol_trigger_file="$DATA_DIR/run/vol_ptt_trigger_$$"
-    rm -f "$vol_trigger_file"
+    overwrite_rm "$vol_trigger_file"
     start_vol_monitor "$vol_trigger_file"
 
     # Write cipher to runtime file so subshells can track changes
@@ -1914,7 +1961,7 @@ in_call_session() {
     local remote_id_file="$DATA_DIR/run/remote_id_$$"
     local remote_cipher_file="$DATA_DIR/run/remote_cipher_$$"
     local relay_flag_file="$DATA_DIR/run/relay_mode_$$"
-    rm -f "$remote_id_file" "$remote_cipher_file" "$relay_flag_file"
+    overwrite_rm "$remote_id_file" "$remote_cipher_file" "$relay_flag_file"
 
     # If we don't know the remote address yet (listener), wait briefly for handshake
     local remote_display="$known_remote"
@@ -2070,7 +2117,7 @@ in_call_session() {
                                 echo -e "\n  ${MAGENTA}${BOLD}[MSG]${NC} ${WHITE}${msg_text}${NC}" >&2
                             fi
                         fi
-                        rm -f "$msg_enc" "$msg_dec" 2>/dev/null
+                        overwrite_rm "$msg_enc" "$msg_dec"
                         ;;
                     AUDIO:*)
                         # Extract base64 data, decode, decrypt, play
@@ -2100,7 +2147,7 @@ in_call_session() {
                                 play_chunk "$dec_file" 2>/dev/null || true
                             fi
                         fi
-                        rm -f "$enc_file" "$dec_file" 2>/dev/null
+                        overwrite_rm "$enc_file" "$dec_file"
                         ;;
                     HANGUP)
                         # In relay mode, ignore HANGUP (others may still be connected)
@@ -2109,14 +2156,14 @@ in_call_session() {
                         fi
                         # Direct call — remote party hung up
                         echo -e "\r\n\r\n  ${YELLOW}${BOLD}Remote party hung up.${NC}" >&2
-                        rm -f "$CONNECTED_FLAG"
+                        overwrite_rm "$CONNECTED_FLAG"
                         break
                         ;;
                 esac
             else
                 # Pipe closed or error — connection lost
                 echo -e "\r\n\r\n  ${RED}${BOLD}Connection lost.${NC}" >&2
-                rm -f "$CONNECTED_FLAG"
+                overwrite_rm "$CONNECTED_FLAG"
                 break
             fi
         done
@@ -2139,7 +2186,7 @@ in_call_session() {
         local key=""
         # Check volume-down double-tap trigger
         if [ -f "$vol_trigger_file" ]; then
-            rm -f "$vol_trigger_file"
+            overwrite_rm "$vol_trigger_file"
             key="$PTT_KEY"  # simulate PTT key press
         else
             key=$(dd bs=1 count=1 2>/dev/null) || true
@@ -2188,13 +2235,13 @@ in_call_session() {
                 fi
                 kill "$REC_PID" 2>/dev/null || true
                 wait "$REC_PID" 2>/dev/null || true
-                rm -f "$REC_FILE" 2>/dev/null
+                overwrite_rm "$REC_FILE"
                 REC_PID=""
                 REC_FILE=""
             fi
             echo -e "\r\n${YELLOW}Hanging up...${NC}" >&2
             proto_send "HANGUP"
-            rm -f "$PTT_FLAG" "$CONNECTED_FLAG"
+            overwrite_rm "$PTT_FLAG" "$CONNECTED_FLAG"
             break
 
         elif [ -z "$key" ]; then
@@ -2234,7 +2281,7 @@ in_call_session() {
                     proto_send "MSG:${chat_b64}"
                     echo -e "  ${DIM}[you] ${chat_msg}${NC}" >&2
                 fi
-                rm -f "$chat_plain" "$chat_enc" 2>/dev/null
+                overwrite_rm "$chat_plain" "$chat_enc"
             fi
             # Switch back to raw mode for PTT
             stty raw -echo -icanon min 0 time 1
@@ -2335,7 +2382,7 @@ test_audio() {
 
     if [ ! -s "$opus_file" ]; then
         log_err "Opus encoding failed"
-        rm -f "$raw_file"
+        overwrite_rm "$raw_file"
         return 1
     fi
 
@@ -2356,7 +2403,7 @@ test_audio() {
         else
             echo -e "${RED}encryption round-trip FAILED${NC}"
         fi
-        rm -f "$enc_file"
+        overwrite_rm "$enc_file"
         opus_file="$dec_file"
     fi
 
@@ -2365,7 +2412,7 @@ test_audio() {
     play_chunk "$opus_file"
     echo -e "${GREEN}done${NC}"
 
-    rm -f "$raw_file" "$opus_file" "$AUDIO_DIR/test_dec_${_tid}.tmp" 2>/dev/null
+    overwrite_rm "$raw_file" "$opus_file" "$AUDIO_DIR/test_dec_${_tid}.tmp"
 
     echo -e "\n  ${GREEN}${BOLD}Audio test complete!${NC}"
     echo -e "  ${DIM}If you heard your voice, the pipeline is working.${NC}\n"
@@ -2580,6 +2627,12 @@ settings_menu() {
             chime_label="${GREEN}${PTT_CHIME}${NC}"
         fi
         echo -e "  ${DIM}PTT chime:            ${NC}${chime_label}"
+
+        local sd_label="${RED}disabled${NC}"
+        if [ "$OVERWRITE_DELETE" -eq 1 ]; then
+            sd_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}Overwrite+del:        ${NC}${sd_label}"
         echo ""
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change Opus encoding quality"
@@ -3353,13 +3406,19 @@ settings_security() {
         if [ "$HMAC_AUTH" -eq 1 ]; then
             hmac_label="${GREEN}enabled${NC}"
         fi
+        local sd_label="${RED}disabled${NC}"
+        if [ "$OVERWRITE_DELETE" -eq 1 ]; then
+            sd_label="${GREEN}enabled${NC}"
+        fi
         local cipher_upper="$(to_upper "$CIPHER")"
-        echo -e "  ${DIM}Cipher:     ${NC}${WHITE}${cipher_upper}${NC}"
-        echo -e "  ${DIM}HMAC auth:  ${NC}${hmac_label}"
+        echo -e "  ${DIM}Cipher:         ${NC}${WHITE}${cipher_upper}${NC}"
+        echo -e "  ${DIM}HMAC auth:      ${NC}${hmac_label}"
+        echo -e "  ${DIM}Overwrite+del: ${NC}${sd_label}"
         echo ""
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change encryption cipher"
         echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} HMAC authentication"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Overwrite before delete"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -3368,6 +3427,196 @@ settings_security() {
         case "$_sec_choice" in
             1) settings_cipher ;;
             2) settings_hmac ;;
+            3) settings_overwrite_delete ;;
+            0|q|Q) return ;;
+            *)
+                echo -e "\n  ${RED}Invalid choice${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+settings_overwrite_delete() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Overwrite Before Delete ═══${NC}\n"
+
+        local sd_label="${RED}disabled${NC}"
+        if [ "$OVERWRITE_DELETE" -eq 1 ]; then
+            sd_label="${GREEN}enabled${NC}"
+        fi
+        echo -e "  ${DIM}Status:${NC} ${sd_label}"
+        echo ""
+
+        echo -e "  ${DIM}During a call, TerminalPhone creates temporary files on${NC}"
+        echo -e "  ${DIM}disk — raw audio recordings, Opus-encoded audio, encrypted${NC}"
+        echo -e "  ${DIM}payloads, voice-effect intermediates, decrypted messages,${NC}"
+        echo -e "  ${DIM}session keys, HMAC material, and nonce logs.${NC}"
+        echo ""
+        echo -e "  ${DIM}These files are${NC} ${BOLD}ephemeral${NC}${DIM}. Audio chunks are deleted${NC}"
+        echo -e "  ${DIM}immediately after playback — they exist on disk only for${NC}"
+        echo -e "  ${DIM}the fraction of a second it takes to decode and play them.${NC}"
+        echo -e "  ${DIM}Chat messages are decrypted into a temp file, read, then${NC}"
+        echo -e "  ${DIM}deleted at once. However, the decrypted text remains${NC}"
+        echo -e "  ${DIM}visible in your terminal's scrollback buffer until the${NC}"
+        echo -e "  ${DIM}terminal is closed or the buffer is cleared. No recordings${NC}"
+        echo -e "  ${DIM}or transcripts are ever saved. When a call ends or the${NC}"
+        echo -e "  ${DIM}app exits, all remaining temp files, session keys, and${NC}"
+        echo -e "  ${DIM}runtime data are removed.${NC}"
+        echo ""
+        echo -e "  ${DIM}By default, deletion uses the standard${NC} ${WHITE}rm${NC} ${DIM}command. This${NC}"
+        echo -e "  ${DIM}removes the file's directory entry but does${NC} ${BOLD}not${NC} ${DIM}erase${NC}"
+        echo -e "  ${DIM}the actual data from the disk. The bytes remain on the${NC}"
+        echo -e "  ${DIM}storage medium until the operating system happens to${NC}"
+        echo -e "  ${DIM}reuse that space for something else. Until then, the${NC}"
+        echo -e "  ${DIM}data can be recovered with forensic tools.${NC}"
+        echo ""
+        echo -e "  ${GREEN}For most users, standard rm is perfectly fine.${NC}"
+        echo -e "  ${DIM}TerminalPhone's temp files are small and short-lived,${NC}"
+        echo -e "  ${DIM}and the disk space is typically reused quickly by normal${NC}"
+        echo -e "  ${DIM}system activity. This feature is for users who want an${NC}"
+        echo -e "  ${DIM}extra layer of protection against forensic recovery.${NC}"
+        echo ""
+        echo -e "  ${BOLD}${WHITE}What this does:${NC}"
+        echo -e "  ${DIM}When enabled, every temporary file is${NC} ${BOLD}overwritten${NC} ${DIM}with${NC}"
+        echo -e "  ${DIM}random data from${NC} ${WHITE}/dev/urandom${NC} ${DIM}before it is deleted.${NC}"
+        echo -e "  ${DIM}The random data is flushed to disk with${NC} ${WHITE}sync${NC}${DIM}, then the${NC}"
+        echo -e "  ${DIM}file is removed. This is an${NC} ${BOLD}overwrite${NC}${DIM}, not a guaranteed${NC}"
+        echo -e "  ${DIM}secure erase — read the limitations below carefully.${NC}"
+        echo ""
+        echo -e "  ${BOLD}${WHITE}Files that are overwritten:${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Raw PCM audio recordings (your voice before encoding)${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Opus-encoded audio files${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Encrypted audio payloads and ciphertext fragments${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Decrypted inbound audio and chat messages${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Voice effect intermediary files${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Runtime cipher and HMAC key material${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Nonce logs (replay protection records)${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Session flags, PID files, and named pipes${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Tor hidden service keys (on address rotation)${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Relay session data (in group bridge mode)${NC}"
+        echo ""
+        echo -e "  ${RED}${BOLD}⚠  This is NOT a guaranteed secure erase:${NC}"
+        echo ""
+        echo -e "  ${RED}•${NC} ${BOLD}SSDs and flash storage${NC} ${DIM}(most modern devices including${NC}"
+        echo -e "    ${DIM}phones): The drive's flash translation layer (FTL)${NC}"
+        echo -e "    ${DIM}uses wear leveling, which means an overwrite may be${NC}"
+        echo -e "    ${DIM}written to${NC} ${BOLD}different physical cells${NC}${DIM}. The original${NC}"
+        echo -e "    ${DIM}data can persist in old NAND cells that the OS cannot${NC}"
+        echo -e "    ${DIM}address or erase. No userspace software can work around${NC}"
+        echo -e "    ${DIM}this — it is a hardware-level limitation.${NC}"
+        echo -e "    ${YELLOW}→ Full-disk encryption (LUKS, FileVault, dm-crypt,${NC}"
+        echo -e "    ${YELLOW}  Android FBE) is the only reliable defense on SSDs.${NC}"
+        echo ""
+        echo -e "  ${RED}•${NC} ${BOLD}Copy-on-write filesystems${NC} ${DIM}(ZFS, Btrfs, APFS) may${NC}"
+        echo -e "    ${DIM}snapshot old data. The overwrite writes to the current${NC}"
+        echo -e "    ${DIM}logical location but old snapshots are not affected.${NC}"
+        echo ""
+        echo -e "  ${GREEN}•${NC} ${BOLD}HDDs${NC} ${DIM}(spinning platters): The overwrite${NC} ${BOLD}does${NC} ${DIM}replace${NC}"
+        echo -e "    ${DIM}the magnetic data at the same physical location. A${NC}"
+        echo -e "    ${DIM}single random pass is effective against all software-${NC}"
+        echo -e "    ${DIM}based recovery tools.${NC}"
+        echo ""
+        echo -e "  ${BOLD}${WHITE}What this protects against:${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Casual recovery tools (testdisk, photorec, strings)${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Filesystem-level scans of unlinked but unoverwritten data${NC}"
+        echo -e "  ${GREEN}•${NC} ${DIM}Other users on shared systems reading freed disk blocks${NC}"
+        echo ""
+        echo -e "  ${BOLD}${WHITE}What this does NOT protect against:${NC}"
+        echo -e "  ${RED}•${NC} ${DIM}NAND-level forensics on SSDs / flash storage${NC}"
+        echo -e "  ${RED}•${NC} ${DIM}Filesystem snapshots or journaling recovery${NC}"
+        echo -e "  ${RED}•${NC} ${DIM}Memory forensics (RAM contents while app is running)${NC}"
+        echo -e "  ${RED}•${NC} ${DIM}Terminal scrollback buffer (chat messages remain visible${NC}"
+        echo -e "    ${DIM}until the terminal is closed or history is cleared)${NC}"
+        echo ""
+        echo -e "  ${YELLOW}If your threat model includes physical device seizure,${NC}"
+        echo -e "  ${YELLOW}enable full-disk encryption. This setting is a useful${NC}"
+        echo -e "  ${YELLOW}additional layer, not a replacement for it.${NC}"
+        echo ""
+        echo -e "  ${DIM}Adds minor latency to call teardown and PTT release${NC}"
+        echo -e "  ${DIM}as files are overwritten before deletion.${NC}"
+
+        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Turn on"
+        echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Turn off"
+        echo -e "  ${BOLD}${WHITE}3${NC} ${CYAN}│${NC} Run test ${DIM}(create a file, overwrite it, and show the result)${NC}"
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back${NC}"
+        echo ""
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r _sd_choice
+
+        case "$_sd_choice" in
+            1)
+                if [ "$OVERWRITE_DELETE" -eq 1 ]; then
+                    log_info "Overwrite before delete is already enabled"
+                else
+                    OVERWRITE_DELETE=1
+                    save_config
+                    log_ok "Overwrite before delete enabled"
+                    echo -e "  ${DIM}Temporary files will be overwritten with random data before removal.${NC}"
+                fi
+                sleep 2
+                ;;
+            2)
+                if [ "$OVERWRITE_DELETE" -eq 0 ]; then
+                    log_info "Overwrite before delete is already disabled"
+                else
+                    OVERWRITE_DELETE=0
+                    save_config
+                    log_ok "Overwrite before delete disabled"
+                    echo -e "  ${DIM}Standard file deletion restored (files are removed but not overwritten).${NC}"
+                fi
+                sleep 2
+                ;;
+            3)
+                clear
+                echo -e "\n${BOLD}${CYAN}═══ Overwrite Delete Test ═══${NC}\n"
+
+                local _test_file="$DATA_DIR/overwrite_test_$(uid).tmp"
+
+                # Create test file with recognizable content
+                echo -e "  ${BOLD}${WHITE}Step 1:${NC} Creating test file with sample data...\n"
+                printf 'SENSITIVE DATA — This is a test message from TerminalPhone.\nShared secret: abc123-fake-key-material\nCall timestamp: 2026-01-01T00:00:00Z\n' > "$_test_file"
+
+                local _test_sz
+                _test_sz=$(file_size "$_test_file")
+                echo -e "  ${DIM}File:${NC} $_test_file"
+                echo -e "  ${DIM}Size:${NC} ${_test_sz} bytes\n"
+
+                echo -e "  ${BOLD}${WHITE}Original contents (plaintext):${NC}\n"
+                echo -e "  ${RED}$(cat "$_test_file" | sed 's/^/  /')${NC}"
+                echo ""
+
+                echo -e "  ${BOLD}${WHITE}Original contents (hex):${NC}\n"
+                echo -e "  ${DIM}$(hexdump -C "$_test_file" | head -8 | sed 's/^/  /')${NC}"
+                echo ""
+
+                # Overwrite with random data
+                echo -e "  ${BOLD}${WHITE}Step 2:${NC} Overwriting with random data from ${WHITE}/dev/urandom${NC}...\n"
+                dd if=/dev/urandom of="$_test_file" bs="$_test_sz" count=1 conv=notrunc 2>/dev/null
+                sync "$_test_file" 2>/dev/null || true
+                echo -e "  ${GREEN}✓${NC} ${DIM}Overwritten ${_test_sz} bytes with random data and flushed to disk${NC}\n"
+
+                echo -e "  ${BOLD}${WHITE}Overwritten contents (hex):${NC}\n"
+                echo -e "  ${GREEN}$(hexdump -C "$_test_file" | head -8 | sed 's/^/  /')${NC}"
+                echo ""
+
+                echo -e "  ${BOLD}${WHITE}Step 3:${NC} Deleting overwritten file...\n"
+                rm -f "$_test_file" 2>/dev/null
+                echo -e "  ${GREEN}✓${NC} ${DIM}File removed${NC}\n"
+
+                echo -e "  ${BOLD}${WHITE}Result:${NC}"
+                echo -e "  ${DIM}The original text is gone. The bytes on disk now contain${NC}"
+                echo -e "  ${DIM}random data, not your sensitive information. Compare the${NC}"
+                echo -e "  ${DIM}hex dumps above — no trace of the original content remains${NC}"
+                echo -e "  ${DIM}at the file's logical location.${NC}\n"
+
+                echo -e "  ${DIM}This is exactly what happens to every temp file during a${NC}"
+                echo -e "  ${DIM}call when overwrite before delete is enabled.${NC}\n"
+
+                echo -ne "  ${DIM}Press any key to return...${NC}"
+                read -r -n 1
+                ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
@@ -3667,7 +3916,7 @@ trap cleanup EXIT INT TERM
 mkdir -p "$DATA_DIR" "$AUDIO_DIR" "$PID_DIR" "$DATA_DIR/run"
 
 # Clean any stale run files from previous sessions
-rm -f "$DATA_DIR/run/"* 2>/dev/null || true
+overwrite_rm "$DATA_DIR/run/"*
 
 # Load saved config
 load_config
