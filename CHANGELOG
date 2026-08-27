@@ -283,3 +283,15 @@ How it works:
 - Interactive Call Interface: Live bitrate telemetry (TX/RX kbps), microphone mute toggle ([M]), in-call text chat ([T]), and clean hangup ([Q]).
 - Cross-Platform Compatibility: Fully compatible across macOS (via CoreAudio / rec / play) and Android Termux (via sox play and low-latency audio capture).
 - Configurable Mode: New setting in Settings (option 9) to toggle between Push-to-Talk and Full Duplex mode. Both users must enable Full Duplex mode for full-duplex streaming before establishing connection.
+
+Version 1.1.9 8-27-26
+
+Integrated Turbo Mode (Single-Hop) for Full Duplex Mode:
+- Integrated Routing Mode Submenu: When enabling Full Duplex mode in Settings (option 9), users are now presented with a dedicated routing mode selector:
+  1. Standard Mode (6 Hops — Maximum Anonymity): 3-hop client + 3-hop onion service. Preserves full anonymity for both caller and listener.
+  2. Turbo Mode (Single-Hop — Low Latency): Enables HiddenServiceSingleHopMode 1 on the listener node to reduce the circuit to 4 hops total, cutting latency to ~450–700ms RTT for natural, fluid conversation.
+- Clear Trade-off Warnings & Confirmation: Turbo mode explicitly details the anonymity tradeoffs (listener's real IP is visible to entry/RP relay; caller remains 100% anonymous) and operational constraints (SocksPort 0 disables outbound SOCKS client dialing on the listener node).
+- Outbound Call Guard: Attempting to initiate an outbound call while single-hop mode is active detects that the SOCKS proxy is disabled and prompts the user to seamlessly switch to Standard mode and restart Tor.
+- Automated Tor Restart Prompts: Prompts to restart Tor automatically when switching between Standard and Turbo Single-Hop modes so configuration changes take effect immediately.
+- UI Telemetry & Dashboard Integration: Main menu status banner, Settings menu, call screens, and the interactive Python WebSocket call dashboard now reflect whether Standard (6 Hops) or Turbo Single-Hop (4 Hops) routing is active.
+
