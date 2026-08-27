@@ -3680,11 +3680,26 @@ settings_menu() {
 settings_full_duplex() {
     clear
     echo -e "\n${BOLD}${CYAN}═══ Full Duplex Mode (WebSockets) ═══${NC}\n"
-    echo -e "  ${DIM}Full duplex enables continuous two-way audio streaming over Tor${NC}"
+    echo -e "  ${DIM}Full duplex enables real-time continuous two-way audio streaming over Tor${NC}"
     echo -e "  ${DIM}via WebSockets without holding the spacebar or push-to-talk.${NC}"
     echo -e "  ${DIM}Both parties can speak and listen simultaneously in real-time.${NC}\n"
-    echo -e "  ${YELLOW}${BOLD}IMPORTANT:${NC} Both caller and listener must enable this setting."
-    echo -e "  ${DIM}When disabled, TerminalPhone uses standard Push-to-Talk.${NC}\n"
+
+    echo -e "  ${YELLOW}${BOLD}⚠  TRADEOFFS & SECURITY CONSIDERATIONS:${NC}\n"
+    echo -e "  ${RED}•${NC} ${BOLD}Traffic Flow Fingerprinting:${NC}"
+    echo -e "    ${DIM}Continuous bidirectional packet flow creates an observable VoIP timing pattern${NC}"
+    echo -e "    ${DIM}for local network observers / ISPs (PTT is silent on the wire between bursts).${NC}"
+    echo -e "  ${RED}•${NC} ${BOLD}Tor Jitter & Variable Latency:${NC}"
+    echo -e "    ${DIM}Tor routes traffic through 6 global relays (average 800–1000ms RTT). Network spikes${NC}"
+    echo -e "    ${DIM}may cause occasional audio jitter or micro-stutters (PTT is immune to jitter).${NC}"
+    echo -e "  ${RED}•${NC} ${BOLD}Always-Live Microphone:${NC}"
+    echo -e "    ${DIM}The microphone transmits continuously unless muted ([M]), capturing background noise.${NC}"
+    echo -e "  ${RED}•${NC} ${BOLD}Battery & Bandwidth Usage:${NC}"
+    echo -e "    ${DIM}Continuous Opus DSP and encryption increase CPU and battery drain on mobile/Termux.${NC}"
+    echo -e "  ${RED}•${NC} ${BOLD}Mutual Requirement:${NC}"
+    echo -e "    ${DIM}Both caller and listener MUST enable Full Duplex in Settings before connecting.${NC}\n"
+
+    echo -e "  ${GREEN}•${NC} ${BOLD}Benefits:${NC} ${DIM}Natural hands-free conversation, simultaneous speaking, live RTT monitor.${NC}\n"
+
     if [ "$FULL_DUPLEX" -eq 1 ]; then
         echo -e "  Current status: ${GREEN}${BOLD}ENABLED (WebSockets full duplex)${NC}\n"
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Switch to Push-to-Talk (half-duplex)"
