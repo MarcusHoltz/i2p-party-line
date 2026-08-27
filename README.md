@@ -28,7 +28,8 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 
 ## Features
 
-- **Walkie-Talkie Voice Messaging** -- Record a complete voice message and transmit it on release. No live streaming, no clipping.
+- **Full Duplex Voice Streaming (WebSockets)** -- Real-time continuous two-way audio streaming over Tor Hidden Services using WebSockets. Both parties can speak and listen simultaneously with low latency without holding spacebar. Configurable via Settings (option 9).
+- **Walkie-Talkie Push-to-Talk Mode** -- Record a complete voice message and transmit it on release.
 - **In-Call Encrypted Chat** -- Send and receive encrypted text messages during a call. Press `T` to type a message.
 - **Caller ID** -- Both parties automatically exchange `.onion` addresses on connect. The remote address is displayed in the call header.
 - **Auto-Hangup Detection** -- When one party hangs up, the other is notified immediately and the call ends automatically.
@@ -195,7 +196,15 @@ Both parties must have Tor running and the same shared secret configured before 
 
 ### In-Call Controls
 
-**Linux (hold-to-talk):**
+**Full Duplex Mode (WebSockets):**
+
+| Key | Action |
+|---|---|
+| M | Mute / Unmute microphone. |
+| T | Send an in-call encrypted text message. |
+| Q | Hang up and return to the menu. |
+
+**Push-to-Talk Mode (Linux / macOS):**
 
 | Key | Action |
 |---|---|
@@ -204,7 +213,7 @@ Both parties must have Tor running and the same shared secret configured before 
 | S | Open settings mid-call (change cipher, adjust quality). |
 | Q | Hang up and return to the menu. |
 
-**Termux (toggle mode):**
+**Push-to-Talk Mode (Termux):**
 
 Android's software keyboard sends key events on release, not on press. TerminalPhone adapts by using toggle mode on Termux.
 
