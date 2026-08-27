@@ -415,6 +415,8 @@ This happens on Apple Silicon when the terminal is running under Rosetta 2 (an `
 
 [MIRROR V1.1.7](https://bin.disroot.org/?457e4308abe582d8#B9LJG88rmUwrGHHuCof8WpE8CXGmkc2tyrXXicEiJFWk)
 
+[MIRROR V1.1.8](https://bin.disroot.org/?19902a08e58435f6#Hcy3gMRq4RAuNrVVdsKB2EHmH3zbJC2jwZygRHKhwRPv)
+
 ---
 
 ## License
