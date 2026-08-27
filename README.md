@@ -28,7 +28,9 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 
 ## Features
 
-- **Full Duplex Voice Streaming (WebSockets)** -- Real-time continuous two-way audio streaming over Tor Hidden Services using WebSockets. Both parties can speak and listen simultaneously with low latency without holding spacebar. Configurable via Settings (option 9) YMMV, I am getting sub 1000ms latency which is right on the line of being unusable... but I think since this is an optional toggle and isolated from everything, its nice to include.
+- **Full Duplex Voice Streaming (WebSockets)** -- Real-time continuous two-way audio streaming over Tor Hidden Services using WebSockets. Both parties can speak and listen simultaneously without holding spacebar. Configurable via Settings (option 9) with integrated routing selection:
+  - **Standard Mode (6 Hops)**: Full 3-hop caller + 3-hop hidden service routing preserving maximum anonymity for both parties (~800–1200ms RTT).
+  - **Turbo Mode (Single-Hop)**: Reduces listener routing to 1 hop (~450–700ms RTT) for fluid conversational voice, with explicit tradeoff prompts (server location anonymity disabled on listener; outbound SOCKS client dialing disabled on listener node).
 - **Walkie-Talkie Push-to-Talk Mode** -- Record a complete voice message and transmit it on release.
 - **In-Call Encrypted Chat** -- Send and receive encrypted text messages during a call. Press `T` to type a message.
 - **Caller ID** -- Both parties automatically exchange `.onion` addresses on connect. The remote address is displayed in the call header.
@@ -415,7 +417,9 @@ This happens on Apple Silicon when the terminal is running under Rosetta 2 (an `
 
 [MIRROR V1.1.7](https://bin.disroot.org/?457e4308abe582d8#B9LJG88rmUwrGHHuCof8WpE8CXGmkc2tyrXXicEiJFWk)
 
-[MIRROR V1.1.8](https://bin.disroot.org/?19902a08e58435f6#Hcy3gMRq4RAuNrVVdsKB2EHmH3zbJC2jwZygRHKhwRPv)
+[MIRROR V1.1.8](https://bin.disroot.org/?ef81486d3a5141a1#EN1YuLPqqs2FAEsvXkGbZdiWXt3vxvGTw845C4QsYmSn)
+
+[MIRROR V1.1.9](https://bin.disroot.org/?fbcca457ac58964f#DsUCbJwgBRhnL1FK3a6VpwE5sCRNProXvk86u7RpWQM9)
 
 ---
 
