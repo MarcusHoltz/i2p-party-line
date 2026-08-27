@@ -28,7 +28,7 @@ TerminalPhone is a single, self-contained Bash script that provides anonymous, e
 
 ## Features
 
-- **Full Duplex Voice Streaming (WebSockets)** -- Real-time continuous two-way audio streaming over Tor Hidden Services using WebSockets. Both parties can speak and listen simultaneously with low latency without holding spacebar. Configurable via Settings (option 9).
+- **Full Duplex Voice Streaming (WebSockets)** -- Real-time continuous two-way audio streaming over Tor Hidden Services using WebSockets. Both parties can speak and listen simultaneously with low latency without holding spacebar. Configurable via Settings (option 9) YMMV, I am getting sub 1000ms latency which is right on the line of being unusable... but I think since this is an optional toggle and isolated from everything, its nice to include.
 - **Walkie-Talkie Push-to-Talk Mode** -- Record a complete voice message and transmit it on release.
 - **In-Call Encrypted Chat** -- Send and receive encrypted text messages during a call. Press `T` to type a message.
 - **Caller ID** -- Both parties automatically exchange `.onion` addresses on connect. The remote address is displayed in the call header.
