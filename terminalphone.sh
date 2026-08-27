@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.8"
+VERSION="1.1.9"
 BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -1002,7 +1002,7 @@ build_ws_engine() {
     cat << 'EOF' > "$WS_ENGINE_FILE"
 #!/usr/bin/env python3
 """
-TerminalPhone v1.1.8 — Full Duplex WebSocket Audio Engine
+TerminalPhone v1.1.9 — Full Duplex WebSocket Audio Engine
 Low-latency bidirectional audio streaming over Tor Hidden Services.
 
 Features:
@@ -1603,7 +1603,7 @@ class AudioPipeline:
 # ============================================================================
 
 class FullDuplexSession:
-    def __init__(self, mode: str, remote_onion: str, listen_port: int, socks_port: int, shared_secret: str, cipher: str, hmac_auth: bool, is_termux: bool, is_macos: bool):
+    def __init__(self, mode: str, remote_onion: str, listen_port: int, socks_port: int, shared_secret: str, cipher: str, hmac_auth: bool, is_termux: bool, is_macos: bool, single_hop: bool = False):
         self.mode = mode  # "server" or "client"
         self.remote_onion = remote_onion
         self.listen_port = listen_port
@@ -1613,6 +1613,7 @@ class FullDuplexSession:
         self.hmac_auth = hmac_auth
         self.is_termux = is_termux
         self.is_macos = is_macos
+        self.single_hop = single_hop
 
         self.running = True
         self.stream = None
@@ -1802,11 +1803,12 @@ class FullDuplexSession:
     def _render_dashboard(self):
         out = []
         out.append("\033[H")
-        out.append(f"  \033[1;36m═══ TerminalPhone v1.1.8 — Full Duplex Call ═══\033[0m\033[K\n")
+        out.append(f"  \033[1;36m═══ TerminalPhone v1.1.9 — Full Duplex Call ═══\033[0m\033[K\n")
         
         target = self.remote_onion if self.mode == "client" else "Incoming Caller"
+        routing_label = "\033[1;33mTurbo Single-Hop (4 Hops)\033[0m" if self.single_hop else "\033[1;32mStandard (6 Hops)\033[0m"
         out.append(f"  \033[2mTarget:      \033[0m\033[1;37m{target}\033[0m\033[K\n")
-        out.append(f"  \033[2mMode:        \033[0m\033[1;32mFull Duplex (WebSockets over Tor)\033[0m\033[K\n")
+        out.append(f"  \033[2mMode:        \033[0m\033[1;32mFull Duplex WebSockets\033[0m  \033[2m[{routing_label}\033[2m]\033[0m\033[K\n")
 
         c_match = "\033[1;32m● Matched\033[0m" if self.cipher == self.remote_cipher else "\033[1;31m● Mismatch\033[0m"
         out.append(f"  \033[2mCipher:      \033[0m\033[1;37m{self.cipher.upper()}\033[0m  {c_match}\033[K\n")
@@ -1873,6 +1875,7 @@ def main():
     hmac_auth = (sys.argv[7] == "1") if len(sys.argv) > 7 else False
     is_termux = (sys.argv[8] == "1") if len(sys.argv) > 8 else False
     is_macos = (sys.argv[9] == "1") if len(sys.argv) > 9 else False
+    single_hop = (sys.argv[10] == "1") if len(sys.argv) > 10 else False
 
     session = FullDuplexSession(
         mode=mode,
@@ -1883,7 +1886,8 @@ def main():
         cipher=cipher,
         hmac_auth=hmac_auth,
         is_termux=is_termux,
-        is_macos=is_macos
+        is_macos=is_macos,
+        single_hop=single_hop
     )
     session.start()
 
@@ -2303,13 +2307,16 @@ listen_for_call() {
     if [ "$FULL_DUPLEX" -eq 1 ]; then
         local onion
         onion=$(get_onion)
-        echo -e "\n${BOLD}${CYAN}═══ Listening for Calls (Full Duplex WebSockets) ═══${NC}\n"
+        local fd_title="Full Duplex WebSockets (Standard 6-Hop)"
+        [ "$SINGLE_HOP" -eq 1 ] && fd_title="Full Duplex WebSockets (Turbo Single-Hop)"
+        echo -e "\n${BOLD}${CYAN}═══ Listening for Calls ($fd_title) ═══${NC}\n"
         echo -e "  ${GREEN}Your address:${NC} ${BOLD}${WHITE}$onion${NC}"
         echo -e "  ${GREEN}Listening on:${NC} port $LISTEN_PORT"
+        [ "$SINGLE_HOP" -eq 1 ] && echo -e "  ${YELLOW}Routing:${NC}      ${YELLOW}Turbo Single-Hop (4 Hops — Server Anonymity Disabled)${NC}"
         echo -e "\n  ${DIM}Share your .onion address with the caller.${NC}"
         echo -e "  ${DIM}[Q] Cancel / Hang up${NC}\n"
         build_ws_engine
-        python3 "$WS_ENGINE_FILE" server "" "$LISTEN_PORT" "$TOR_SOCKS_PORT" "$SHARED_SECRET" "$CIPHER" "$HMAC_AUTH" "$IS_TERMUX" "$IS_MACOS"
+        python3 "$WS_ENGINE_FILE" server "" "$LISTEN_PORT" "$TOR_SOCKS_PORT" "$SHARED_SECRET" "$CIPHER" "$HMAC_AUTH" "$IS_TERMUX" "$IS_MACOS" "$SINGLE_HOP"
         cleanup_call
         start_auto_listener
         return 0
@@ -2410,12 +2417,31 @@ call_remote() {
         remote_onion="${remote_onion}.onion"
     fi
 
+    # Check if single-hop mode is enabled on this node (SOCKS proxy disabled)
+    if [ "$SINGLE_HOP" -eq 1 ]; then
+        echo -e "\n  ${YELLOW}${BOLD}⚠  Single-Hop Mode is Active${NC}"
+        echo -e "  ${DIM}In single-hop mode, Tor disables the SOCKS client proxy (${TOR_SOCKS_PORT}).${NC}"
+        echo -e "  ${DIM}This node can receive calls, but cannot initiate outbound calls.${NC}\n"
+        echo -ne "  ${BOLD}Switch to Standard Mode and restart Tor to make this call? [Y/n]: ${NC}"
+        read -r _switch_sh
+        if [ "$_switch_sh" != "n" ] && [ "$_switch_sh" != "N" ]; then
+            SINGLE_HOP=0
+            save_config
+            log_info "Switching to Standard mode (restoring SOCKS proxy)..."
+            stop_tor
+            start_tor || return 1
+        else
+            log_warn "Call cancelled (outbound calls unavailable in single-hop mode)"
+            return 1
+        fi
+    fi
+
     start_tor || return 1
 
     if [ "$FULL_DUPLEX" -eq 1 ]; then
         echo -e "\n  ${DIM}Connecting to ${remote_onion}:${LISTEN_PORT} via Tor WebSockets (Full Duplex)...${NC}"
         build_ws_engine
-        python3 "$WS_ENGINE_FILE" client "$remote_onion" "$LISTEN_PORT" "$TOR_SOCKS_PORT" "$SHARED_SECRET" "$CIPHER" "$HMAC_AUTH" "$IS_TERMUX" "$IS_MACOS"
+        python3 "$WS_ENGINE_FILE" client "$remote_onion" "$LISTEN_PORT" "$TOR_SOCKS_PORT" "$SHARED_SECRET" "$CIPHER" "$HMAC_AUTH" "$IS_TERMUX" "$IS_MACOS" "$SINGLE_HOP"
         cleanup_call
         return 0
     fi
@@ -3394,7 +3420,13 @@ show_status() {
 
     # Config
     local mode_str="Push-to-Talk"
-    [ "$FULL_DUPLEX" -eq 1 ] && mode_str="Full Duplex (WebSockets)"
+    if [ "$FULL_DUPLEX" -eq 1 ]; then
+        if [ "$SINGLE_HOP" -eq 1 ]; then
+            mode_str="Full Duplex (Turbo Single-Hop WebSockets)"
+        else
+            mode_str="Full Duplex (Standard 6-Hop WebSockets)"
+        fi
+    fi
     local ptt_disp="SPACEBAR"
     [ "$PTT_KEY" != " " ] && ptt_disp="$PTT_KEY"
     echo -e "\n  ${DIM}Mode:         $mode_str${NC}"
@@ -3571,7 +3603,11 @@ settings_menu() {
 
         local fd_label="${RED}disabled (Push-to-Talk)${NC}"
         if [ "$FULL_DUPLEX" -eq 1 ]; then
-            fd_label="${GREEN}enabled (WebSockets full duplex)${NC}"
+            if [ "$SINGLE_HOP" -eq 1 ]; then
+                fd_label="${YELLOW}enabled (Turbo Single-Hop WebSockets)${NC}"
+            else
+                fd_label="${GREEN}enabled (Standard 6-Hop WebSockets)${NC}"
+            fi
         fi
         echo -e "  ${DIM}Full duplex:          ${NC}${fd_label}"
         echo ""
@@ -3677,55 +3713,168 @@ settings_menu() {
     done
 }
 
-settings_full_duplex() {
+settings_full_duplex_mode_select() {
     clear
-    echo -e "\n${BOLD}${CYAN}═══ Full Duplex Mode (WebSockets) ═══${NC}\n"
-    echo -e "  ${DIM}Full duplex enables real-time continuous two-way audio streaming over Tor${NC}"
-    echo -e "  ${DIM}via WebSockets without holding the spacebar or push-to-talk.${NC}"
-    echo -e "  ${DIM}Both parties can speak and listen simultaneously in real-time.${NC}\n"
+    echo -e "\n${BOLD}${CYAN}═══ Select Full Duplex Routing Mode ═══${NC}\n"
+    echo -e "  ${DIM}Choose the Tor circuit routing mode for Full Duplex WebSockets:${NC}\n"
 
-    echo -e "  ${YELLOW}${BOLD}⚠  TRADEOFFS & SECURITY CONSIDERATIONS:${NC}\n"
-    echo -e "  ${RED}•${NC} ${BOLD}Traffic Flow Fingerprinting:${NC}"
-    echo -e "    ${DIM}Continuous bidirectional packet flow creates an observable VoIP timing pattern${NC}"
-    echo -e "    ${DIM}for local network observers / ISPs (PTT is silent on the wire between bursts).${NC}"
-    echo -e "  ${RED}•${NC} ${BOLD}Tor Jitter & Variable Latency:${NC}"
-    echo -e "    ${DIM}Tor routes traffic through 6 global relays (average 800–1000ms RTT). Network spikes${NC}"
-    echo -e "    ${DIM}may cause occasional audio jitter or micro-stutters (PTT is immune to jitter).${NC}"
-    echo -e "  ${RED}•${NC} ${BOLD}Always-Live Microphone:${NC}"
-    echo -e "    ${DIM}The microphone transmits continuously unless muted ([M]), capturing background noise.${NC}"
-    echo -e "  ${RED}•${NC} ${BOLD}Battery & Bandwidth Usage:${NC}"
-    echo -e "    ${DIM}Continuous Opus DSP and encryption increase CPU and battery drain on mobile/Termux.${NC}"
-    echo -e "  ${RED}•${NC} ${BOLD}Mutual Requirement:${NC}"
-    echo -e "    ${DIM}Both caller and listener MUST enable Full Duplex in Settings before connecting.${NC}\n"
+    echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} ${GREEN}${BOLD}Standard Mode${NC} ${DIM}(6 Hops — Maximum Anonymity)${NC}"
+    echo -e "      ${DIM}• Standard 3-hop client + 3-hop hidden service (6 relays total)${NC}"
+    echo -e "      ${DIM}• Complete location anonymity preserved for both caller & listener${NC}"
+    echo -e "      ${DIM}• SOCKS proxy active (can make and receive calls)${NC}"
+    echo -e "      ${DIM}• Expected Latency: ~800–1200ms RTT${NC}\n"
 
-    echo -e "  ${GREEN}•${NC} ${BOLD}Benefits:${NC} ${DIM}Natural hands-free conversation, simultaneous speaking, live RTT monitor.${NC}\n"
+    echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} ${YELLOW}${BOLD}Turbo Mode${NC} ${DIM}(Single-Hop — Low Latency)${NC}"
+    echo -e "      ${DIM}• Reduces listener circuit to 1 hop (4 relays total)${NC}"
+    echo -e "      ${DIM}• Cuts RTT latency down to ~450–700ms for natural conversation${NC}"
+    echo -e "      ${RED}• ⚠ Server Anonymity:${NC} ${DIM}Listener's real IP is visible to entry/RP relay${NC}"
+    echo -e "      ${RED}• ⚠ SOCKS Proxy:${NC} ${DIM}Outbound dialing disabled while in Single-Hop mode${NC}"
+    echo -e "      ${DIM}• Best for: Hosting a line / receiving incoming calls${NC}\n"
 
-    if [ "$FULL_DUPLEX" -eq 1 ]; then
-        echo -e "  Current status: ${GREEN}${BOLD}ENABLED (WebSockets full duplex)${NC}\n"
-        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Switch to Push-to-Talk (half-duplex)"
-    else
-        echo -e "  Current status: ${RED}${BOLD}DISABLED (Push-to-Talk)${NC}\n"
-        echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Enable Full Duplex (WebSockets)"
-    fi
-    echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to Settings${NC}\n"
+    echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Cancel / Back${NC}\n"
     echo -ne "  ${BOLD}Select: ${NC}"
-    read -r fd_choice
-    case "$fd_choice" in
+    read -r _fd_mode_choice
+
+    case "$_fd_mode_choice" in
         1)
-            if [ "$FULL_DUPLEX" -eq 1 ]; then
-                FULL_DUPLEX=0
-                log_ok "Full Duplex disabled — using Push-to-Talk"
-            else
-                FULL_DUPLEX=1
-                log_ok "Full Duplex enabled — using WebSockets"
-            fi
+            local prev_sh=$SINGLE_HOP
+            FULL_DUPLEX=1
+            SINGLE_HOP=0
             save_config
+            log_ok "Full Duplex enabled in Standard Mode (6 Hops, Full Anonymity)"
+            if [ "$prev_sh" -eq 1 ] && [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
+                echo ""
+                echo -ne "  ${BOLD}Tor was running in Single-Hop mode. Restart Tor now to apply Standard mode? [Y/n]: ${NC}"
+                read -r _restart_tor_choice
+                if [ "$_restart_tor_choice" != "n" ] && [ "$_restart_tor_choice" != "N" ]; then
+                    stop_tor
+                    start_tor
+                else
+                    echo -e "  ${DIM}Remember to restart Tor before calling or listening.${NC}"
+                fi
+            fi
+            sleep 1
+            ;;
+        2)
+            clear
+            echo -e "\n${BOLD}${YELLOW}═══ ⚠  Turbo Mode (Single-Hop) Tradeoffs ═══${NC}\n"
+            echo -e "  ${DIM}Please review the security and operational tradeoffs before enabling:${NC}\n"
+            echo -e "  ${RED}•${NC} ${BOLD}Server Location Anonymity is Disabled:${NC}"
+            echo -e "    ${DIM}Your real IP is exposed to your Tor guard / rendezvous relay.${NC}"
+            echo -e "    ${DIM}The incoming caller remains 100% anonymous (they still use 3 hops).${NC}\n"
+            echo -e "  ${RED}•${NC} ${BOLD}SOCKS Client Proxy is Disabled:${NC}"
+            echo -e "    ${DIM}Tor requires SocksPort 0 in single-hop mode. You cannot make outbound${NC}"
+            echo -e "    ${DIM}calls while in this mode — only receive them.${NC}\n"
+            echo -e "  ${GREEN}•${NC} ${BOLD}Significantly Lower Latency:${NC}"
+            echo -e "    ${DIM}Drops RTT from ~1000ms to ~500ms, making two-way conversation fluid.${NC}\n"
+            echo -ne "  ${BOLD}Enable Turbo Mode (Single-Hop)? [y/N]: ${NC}"
+            read -r _turbo_confirm
+            if [ "$_turbo_confirm" = "y" ] || [ "$_turbo_confirm" = "Y" ]; then
+                local prev_sh=$SINGLE_HOP
+                FULL_DUPLEX=1
+                SINGLE_HOP=1
+                save_config
+                log_ok "Full Duplex enabled in Turbo Mode (Single-Hop, Low Latency)"
+                if [ "$prev_sh" -ne 1 ] && [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
+                    echo ""
+                    echo -ne "  ${BOLD}Tor must be restarted to apply Single-Hop mode. Restart Tor now? [Y/n]: ${NC}"
+                    read -r _restart_tor_choice
+                    if [ "$_restart_tor_choice" != "n" ] && [ "$_restart_tor_choice" != "N" ]; then
+                        stop_tor
+                        start_tor
+                    else
+                        echo -e "  ${DIM}Remember to restart Tor before listening for calls.${NC}"
+                    fi
+                fi
+            else
+                log_info "Turbo Mode cancelled"
+            fi
             sleep 1
             ;;
         *)
             return
             ;;
     esac
+}
+
+settings_full_duplex() {
+    while true; do
+        clear
+        echo -e "\n${BOLD}${CYAN}═══ Full Duplex Mode (WebSockets) ═══${NC}\n"
+        echo -e "  ${DIM}Full duplex enables real-time continuous two-way audio streaming over Tor${NC}"
+        echo -e "  ${DIM}via WebSockets without holding the spacebar or push-to-talk.${NC}"
+        echo -e "  ${DIM}Both parties can speak and listen simultaneously in real-time.${NC}\n"
+
+        echo -e "  ${YELLOW}${BOLD}⚠  TRADEOFFS & CONSIDERATIONS:${NC}\n"
+        echo -e "  ${RED}•${NC} ${BOLD}Traffic Flow Fingerprinting:${NC}"
+        echo -e "    ${DIM}Continuous bidirectional packet flow creates an observable VoIP timing pattern${NC}"
+        echo -e "    ${DIM}for local network observers / ISPs (PTT is silent on the wire between bursts).${NC}"
+        echo -e "  ${RED}•${NC} ${BOLD}Tor Latency & Routing:${NC}"
+        echo -e "    ${DIM}Standard mode routes through 6 relays (~800–1200ms RTT). Turbo single-hop${NC}"
+        echo -e "    ${DIM}mode reduces this to 4 relays (~450–700ms RTT) with reduced server anonymity.${NC}"
+        echo -e "  ${RED}•${NC} ${BOLD}Always-Live Microphone:${NC}"
+        echo -e "    ${DIM}The microphone transmits continuously unless muted ([M]), capturing background noise.${NC}"
+        echo -e "  ${RED}•${NC} ${BOLD}Battery & Bandwidth Usage:${NC}"
+        echo -e "    ${DIM}Continuous Opus DSP and encryption increase CPU and battery drain on mobile/Termux.${NC}"
+        echo -e "  ${RED}•${NC} ${BOLD}Mutual Requirement:${NC}"
+        echo -e "    ${DIM}Both caller and listener MUST enable Full Duplex in Settings before connecting.${NC}\n"
+
+        echo -e "  ${GREEN}•${NC} ${BOLD}Benefits:${NC} ${DIM}Natural hands-free conversation, simultaneous speaking, live RTT monitor.${NC}\n"
+
+        local status_str="${RED}${BOLD}DISABLED (Push-to-Talk)${NC}"
+        if [ "$FULL_DUPLEX" -eq 1 ]; then
+            if [ "$SINGLE_HOP" -eq 1 ]; then
+                status_str="${YELLOW}${BOLD}ENABLED — Turbo Mode (Single-Hop, Low Latency)${NC}"
+            else
+                status_str="${GREEN}${BOLD}ENABLED — Standard Mode (6 Hops, Full Anonymity)${NC}"
+            fi
+        fi
+        echo -e "  Current status: ${status_str}\n"
+
+        if [ "$FULL_DUPLEX" -eq 1 ]; then
+            echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Switch to Push-to-Talk (half-duplex)"
+            echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Change Routing Mode (Standard vs Turbo Single-Hop)"
+        else
+            echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Enable Full Duplex (WebSockets)"
+        fi
+        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to Settings${NC}\n"
+        echo -ne "  ${BOLD}Select: ${NC}"
+        read -r fd_choice
+        case "$fd_choice" in
+            1)
+                if [ "$FULL_DUPLEX" -eq 1 ]; then
+                    local prev_sh=$SINGLE_HOP
+                    FULL_DUPLEX=0
+                    save_config
+                    log_ok "Full Duplex disabled — using Push-to-Talk"
+                    if [ "$prev_sh" -eq 1 ] && [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
+                        echo ""
+                        echo -ne "  ${BOLD}Tor was in Single-Hop mode. Restore standard Tor routing and restart? [Y/n]: ${NC}"
+                        read -r _rst_sh
+                        if [ "$_rst_sh" != "n" ] && [ "$_rst_sh" != "N" ]; then
+                            SINGLE_HOP=0
+                            save_config
+                            stop_tor
+                            start_tor
+                        fi
+                    fi
+                    sleep 1
+                else
+                    settings_full_duplex_mode_select
+                fi
+                ;;
+            2)
+                if [ "$FULL_DUPLEX" -eq 1 ]; then
+                    settings_full_duplex_mode_select
+                fi
+                ;;
+            0|q|Q)
+                return
+                ;;
+            *)
+                ;;
+        esac
+    done
 }
 
 settings_cipher() {
@@ -4710,7 +4859,13 @@ show_banner() {
     echo -e "  ${TOR_PURPLE}───────────────────────────────────────${NC}"
     local cipher_display="$(to_upper "$CIPHER")"
     local mode_display="Push-to-Talk"
-    [ "$FULL_DUPLEX" -eq 1 ] && mode_display="Full Duplex (WebSockets)"
+    if [ "$FULL_DUPLEX" -eq 1 ]; then
+        if [ "$SINGLE_HOP" -eq 1 ]; then
+            mode_display="Full Duplex (Turbo 1-Hop)"
+        else
+            mode_display="Full Duplex (Standard 6-Hop)"
+        fi
+    fi
     echo -e "  ${DIM}v${VERSION} | ${mode_display} | End-to-End ${cipher_display}${NC}\n"
 }
 
@@ -4737,7 +4892,11 @@ main_menu() {
         fi
         local mode_status="${GREEN}PTT${NC}"
         if [ "$FULL_DUPLEX" -eq 1 ]; then
-            mode_status="${GREEN}FullDuplex${NC}"
+            if [ "$SINGLE_HOP" -eq 1 ]; then
+                mode_status="${YELLOW}FullDuplex(Turbo)${NC}"
+            else
+                mode_status="${GREEN}FullDuplex(Std)${NC}"
+            fi
         fi
         local _ptt_d="SPACE"
         [ "$PTT_KEY" != " " ] && _ptt_d="$PTT_KEY"
