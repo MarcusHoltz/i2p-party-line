@@ -264,3 +264,22 @@ Off by default. Standard rm deletion is used unless the user opts in. Adds minor
 
 Dependency installer resilience on Ubuntu. Fixed an issue reported on Ubuntu 24.04 (Noble) where the dependency installer (option 7) would fail if the user had a broken or unsupported third-party PPA configured on their system. The reported case involved the nilarimogard/webupd8 PPA, which has no Release file for Noble — when apt-get update ran, it hit this broken PPA and returned a non-zero exit code, which aborted the entire install before any packages were installed. The script itself never adds this PPA; it was already present on the user's system from a previous unrelated install. The fix: apt-get update now runs with || true so that a failing third-party repository does not block the install. The standard Ubuntu repositories still update normally, and all of TerminalPhone's dependencies (tor, opus-tools, sox, socat, openssl, alsa-utils) are available in Ubuntu's default repos — no PPA is needed. The verification step after install still checks every dependency and reports any that are missing, so actual failures are not silently swallowed. This change applies to both the main dependency installer and the Snowflake installer.
 
+Version 1.1.8 8-27-26
+
+To keep with the main idea of a monolithic bash script...im cheating and just placing the python websocket engine inside he bash script. It will place itself in .terminalphone on startup.
+
+Full Duplex Audio Streaming over Tor via WebSockets.
+TerminalPhone now supports true bidirectional full-duplex voice communication over Tor Hidden Services using WebSockets.
+Both parties can speak and listen simultaneously in real-time with low latency, without holding spacebar or using push-to-talk.
+
+How it works:
+- Transport: RFC 6455 WebSockets over Tor Hidden Services (v3 onion services). A single persistent bidirectional stream carries continuous audio packets (binary frames) and control signals (text frames) through Tor SOCKS5.
+- The WebSocket upgrade uses a clean, direct HTTP/1.1 101 Switching Protocols handshake without standard RFC GUID magic strings or arbitrary UUID headers.
+- Zero External Pip Dependencies: Built with a lightweight Python 3 engine using exclusively the standard library (asyncio, socket, struct, hashlib, hmac, ctypes, subprocess), ensuring zero extra pip packages needed on macOS, Termux, or Linux.
+- In-Memory Opus Pipeline: Direct libopus ctypes binding enables sub-millisecond audio frame encoding and decoding with zero disk I/O and zero pipe subprocess overhead.
+- Authenticated Encryption: Every audio frame is encrypted with AES-256-CTR and authenticated with HMAC-SHA256, tagged with monotonic sequence nonces for complete replay protection.
+- Adaptive Jitter Buffer: Smooths out Tor network jitter with automatic latency drift compensation and late-frame dropping.
+- Real-time Tor RTT Monitoring: Displays live round-trip network latency in milliseconds directly on the call dashboard using in-band Ping/Pong frames.
+- Interactive Call Interface: Live bitrate telemetry (TX/RX kbps), microphone mute toggle ([M]), in-call text chat ([T]), and clean hangup ([Q]).
+- Cross-Platform Compatibility: Fully compatible across macOS (via CoreAudio / rec / play) and Android Termux (via sox play and low-latency audio capture).
+- Configurable Mode: New setting in Settings (option 9) to toggle between Push-to-Talk and Full Duplex mode. Both users must enable Full Duplex mode for full-duplex streaming before establishing connection.
