@@ -9,7 +9,7 @@ set -euo pipefail
 # CONFIGURATION
 #=============================================================================
 APP_NAME="TerminalPhone"
-VERSION="1.1.9"
+VERSION="1.1.7"
 BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 DATA_DIR="$BASE_DIR/.terminalphone"
 TOR_DIR="$DATA_DIR/tor_data"
@@ -28,11 +28,6 @@ HMAC_RUNTIME_FILE="$DATA_DIR/run/hmac_$$"
 NONCE_LOG_FILE="$DATA_DIR/run/nonces_$$"
 AUTO_LISTEN_FLAG="$DATA_DIR/run/autolisten_$$"
 AUTO_LISTEN_PID=""
-REC_PID=""
-VOL_MON_PID=""
-CIRCUIT_REFRESH_PID=""
-CALL_ACTIVE=0
-WS_ENGINE_FILE="$DATA_DIR/terminalphone_ws.py"
 
 
 # Defaults
@@ -55,7 +50,6 @@ HMAC_AUTH=0           # HMAC-sign all protocol messages (off by default)
 SINGLE_HOP=0          # Single-hop hidden service (off by default, sacrifices server anonymity for speed)
 PTT_CHIME="off"       # PTT notification chime (off, tone, double, chirp, ding, click, custom)
 OVERWRITE_DELETE=0    # Overwrite temp files with random data before deletion (off by default)
-FULL_DUPLEX=0         # Full duplex WebSockets mode (off by default, requires both parties)
 
 # Custom voice effect parameters (used when VOICE_EFFECT=custom)
 VOICE_PITCH=0         # Pitch shift in cents (-600 to +600, 0=off)
@@ -337,7 +331,6 @@ HMAC_AUTH=$HMAC_AUTH
 SINGLE_HOP=$SINGLE_HOP
 PTT_CHIME="$PTT_CHIME"
 OVERWRITE_DELETE=$OVERWRITE_DELETE
-FULL_DUPLEX=$FULL_DUPLEX
 EOF
 }
 
@@ -354,19 +347,19 @@ install_deps() {
 
     local deps_needed=()
     local all_deps
-    local pkg_names_apt="tor opus-tools sox socat openssl alsa-utils python3"
-    local pkg_names_dnf="tor opus-tools sox socat openssl alsa-utils python3"
-    local pkg_names_pacman="tor opus-tools sox socat openssl alsa-utils python"
-    local pkg_names_pkg="tor opus-tools sox socat openssl-tool ffmpeg termux-api python pulseaudio"
-    local pkg_names_brew="tor opus-tools sox socat openssl python3"
+    local pkg_names_apt="tor opus-tools sox socat openssl alsa-utils"
+    local pkg_names_dnf="tor opus-tools sox socat openssl alsa-utils"
+    local pkg_names_pacman="tor opus-tools sox socat openssl alsa-utils"
+    local pkg_names_pkg="tor opus-tools sox socat openssl-tool ffmpeg termux-api"
+    local pkg_names_brew="tor opus-tools sox socat openssl"
 
     # Shared deps + platform-specific
     if [ $IS_TERMUX -eq 1 ]; then
-        all_deps=(tor opusenc opusdec sox socat openssl ffmpeg termux-microphone-record python3 pulseaudio)
+        all_deps=(tor opusenc opusdec sox socat openssl ffmpeg termux-microphone-record)
     elif [ $IS_MACOS -eq 1 ]; then
-        all_deps=(tor opusenc opusdec sox socat openssl rec play python3)
+        all_deps=(tor opusenc opusdec sox socat openssl rec play)
     else
-        all_deps=(tor opusenc opusdec sox socat openssl arecord aplay python3)
+        all_deps=(tor opusenc opusdec sox socat openssl arecord aplay)
     fi
 
     # Check which deps are missing
@@ -994,910 +987,6 @@ proto_verify() {
 }
 
 #=============================================================================
-# FULL DUPLEX WEBSOCKET ENGINE BUILDER
-#=============================================================================
-
-build_ws_engine() {
-    mkdir -p "$DATA_DIR"
-    cat << 'EOF' > "$WS_ENGINE_FILE"
-#!/usr/bin/env python3
-"""
-TerminalPhone v1.1.9 — Full Duplex WebSocket Audio Engine
-Low-latency bidirectional audio streaming over Tor Hidden Services.
-
-Features:
-- Pure Python 3 (standard library only, zero pip dependencies).
-- GUID-free clean HTTP/1.1 101 WebSocket handshake over Tor SOCKS5.
-- Real-time continuous audio capture and playback (macOS, Termux, Linux).
-- In-memory libopus ctypes direct encoding/decoding (with PCM/u-law fallback).
-- End-to-End Authenticated Encryption (AES-256-CTR + HMAC-SHA256 with monotonic sequence nonces).
-- Adaptive Jitter Buffer with latency drift compensation.
-- Live Tor RTT latency monitoring (ms) and bandwidth telemetry.
-- Full ANSI Terminal UI with live status, mic mute toggle ([M]), in-call chat ([T]), and clean hangup ([Q]).
-"""
-
-import sys
-import os
-import time
-import struct
-import socket
-import select
-import hashlib
-import hmac
-import ctypes
-import ctypes.util
-import subprocess
-import threading
-import termios
-import tty
-import signal
-
-# ============================================================================
-# OPUS CTYPES BINDINGS (ZERO PIP DEPENDENCIES)
-# ============================================================================
-
-class OpusCodec:
-    """Direct ctypes binding to libopus for sub-millisecond in-memory audio encoding/decoding."""
-    def __init__(self, sample_rate=16000, channels=1, bitrate=16000):
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.bitrate = bitrate
-        self.lib = None
-        self.encoder = None
-        self.decoder = None
-        self.available = False
-        self._load_libopus()
-
-    def _load_libopus(self):
-        candidate_paths = [
-            ctypes.util.find_library("opus"),
-            "/opt/homebrew/lib/libopus.dylib",
-            "/opt/homebrew/lib/libopus.0.dylib",
-            "/usr/local/lib/libopus.dylib",
-            "/usr/lib/libopus.so.0",
-            "/usr/lib/x86_64-linux-gnu/libopus.so.0",
-            "/usr/lib/aarch64-linux-gnu/libopus.so.0",
-            "/usr/lib/arm-linux-gnueabihf/libopus.so.0",
-            os.path.expanduser("~/.termux/lib/libopus.so"),
-            "/data/data/com.termux/files/usr/lib/libopus.so",
-            "/data/data/com.termux/files/usr/lib/libopus.so.0",
-        ]
-        if "PREFIX" in os.environ:
-            candidate_paths.insert(0, os.path.join(os.environ["PREFIX"], "lib", "libopus.so"))
-
-        for path in candidate_paths:
-            if path and os.path.exists(path):
-                try:
-                    self.lib = ctypes.CDLL(path)
-                    break
-                except Exception:
-                    pass
-        if not self.lib:
-            for name in ["opus", "libopus.so.0", "libopus.dylib"]:
-                try:
-                    self.lib = ctypes.CDLL(name)
-                    break
-                except Exception:
-                    pass
-
-        if self.lib:
-            try:
-                # Constants
-                self.OPUS_APPLICATION_VOIP = 2048
-                self.OPUS_SET_BITRATE_REQUEST = 4002
-                self.OPUS_SET_VBR_REQUEST = 4006
-                self.OPUS_SET_INBAND_FEC_REQUEST = 4012
-                self.OPUS_SET_DTX_REQUEST = 4016
-                self.OPUS_SET_SIGNAL_REQUEST = 4024
-                self.OPUS_SIGNAL_VOICE = 3001
-
-                # Function prototypes
-                self.lib.opus_encoder_create.restype = ctypes.c_void_p
-                self.lib.opus_encoder_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-                self.lib.opus_encoder_ctl.restype = ctypes.c_int
-                self.lib.opus_encoder_ctl.argtypes = [ctypes.c_void_p, ctypes.c_int]
-                self.lib.opus_encode.restype = ctypes.c_int
-                self.lib.opus_encode.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int16), ctypes.c_int, ctypes.c_char_p, ctypes.c_int32]
-                self.lib.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
-
-                self.lib.opus_decoder_create.restype = ctypes.c_void_p
-                self.lib.opus_decoder_create.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
-                self.lib.opus_decode.restype = ctypes.c_int
-                self.lib.opus_decode.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32, ctypes.POINTER(ctypes.c_int16), ctypes.c_int, ctypes.c_int]
-                self.lib.opus_decoder_destroy.argtypes = [ctypes.c_void_p]
-
-                err = ctypes.c_int()
-                self.encoder = self.lib.opus_encoder_create(self.sample_rate, self.channels, self.OPUS_APPLICATION_VOIP, ctypes.byref(err))
-                if err.value == 0 and self.encoder:
-                    self.lib.opus_encoder_ctl(self.encoder, self.OPUS_SET_BITRATE_REQUEST, ctypes.c_int(self.bitrate))
-                    self.lib.opus_encoder_ctl(self.encoder, self.OPUS_SET_VBR_REQUEST, ctypes.c_int(1))
-                    self.lib.opus_encoder_ctl(self.encoder, self.OPUS_SET_INBAND_FEC_REQUEST, ctypes.c_int(1))
-                    self.lib.opus_encoder_ctl(self.encoder, self.OPUS_SET_DTX_REQUEST, ctypes.c_int(1))
-                    self.lib.opus_encoder_ctl(self.encoder, self.OPUS_SET_SIGNAL_REQUEST, ctypes.c_int(self.OPUS_SIGNAL_VOICE))
-
-                self.decoder = self.lib.opus_decoder_create(self.sample_rate, self.channels, ctypes.byref(err))
-                if self.encoder and self.decoder:
-                    self.available = True
-            except Exception:
-                self.available = False
-
-    def encode(self, pcm_data: bytes, frame_size: int) -> bytes:
-        """Encodes raw 16-bit signed PCM bytes into an Opus packet."""
-        if not self.available or not self.encoder:
-            return pcm_data  # Fallback to uncompressed PCM
-        samples = len(pcm_data) // 2
-        if samples != frame_size:
-            return b""
-        pcm_array = (ctypes.c_int16 * frame_size).from_buffer_copy(pcm_data)
-        out_buf = ctypes.create_string_buffer(1275)
-        nbytes = self.lib.opus_encode(self.encoder, pcm_array, frame_size, out_buf, 1275)
-        if nbytes > 0:
-            return out_buf.raw[:nbytes]
-        return b""
-
-    def decode(self, opus_data: bytes, frame_size: int) -> bytes:
-        """Decodes an Opus packet back into 16-bit signed PCM bytes."""
-        if not self.available or not self.decoder:
-            return opus_data
-        out_pcm = (ctypes.c_int16 * frame_size)()
-        nsamp = self.lib.opus_decode(self.decoder, opus_data, len(opus_data), out_pcm, frame_size, 0)
-        if nsamp > 0:
-            return bytes(out_pcm)[:nsamp * 2]
-        return b"\x00" * (frame_size * 2)
-
-    def close(self):
-        if self.lib:
-            if self.encoder:
-                try:
-                    self.lib.opus_encoder_destroy(self.encoder)
-                except Exception:
-                    pass
-                self.encoder = None
-            if self.decoder:
-                try:
-                    self.lib.opus_decoder_destroy(self.decoder)
-                except Exception:
-                    pass
-                self.decoder = None
-
-
-# ============================================================================
-# CRYPTOGRAPHY & REPLAY PROTECTION (ZERO PIP DEPENDENCIES)
-# ============================================================================
-
-class CryptoEngine:
-    """
-    Authenticated stream encryption using AES-256 (CTR/CBC) + HMAC-SHA256
-    with monotonic sequence counters for replay protection.
-    """
-    def __init__(self, shared_secret: str, cipher_name: str = "aes-256-cbc", enforce_hmac: bool = True):
-        self.shared_secret = shared_secret.encode("utf-8")
-        self.cipher_name = cipher_name.lower()
-        self.enforce_hmac = enforce_hmac
-
-        # Derive 32-byte encryption key + 32-byte HMAC key via PBKDF2-HMAC-SHA256
-        salt = b"TerminalPhone_v1.1.8_FullDuplex_Salt"
-        derived = hashlib.pbkdf2_hmac("sha256", self.shared_secret, salt, 20000, dklen=64)
-        self.enc_key = derived[:32]
-        self.hmac_key = derived[32:]
-
-        self.tx_seq = 0
-        self.rx_seq_max = -1
-
-    def _aes_ctr_keystream(self, key: bytes, nonce: bytes, length: int) -> bytes:
-        """Pure-Python AES-CTR keystream generator using hashlib for low overhead."""
-        keystream = bytearray()
-        counter = 0
-        while len(keystream) < length:
-            block = hashlib.sha256(key + nonce + struct.pack(">Q", counter)).digest()
-            keystream.extend(block)
-            counter += 1
-        return bytes(keystream[:length])
-
-    def encrypt(self, plaintext: bytes) -> bytes:
-        """
-        Encrypts plaintext into authenticated packet:
-        [ 8-byte Big-Endian Sequence Nonce ][ Ciphertext ][ 16-byte HMAC Tag ]
-        """
-        self.tx_seq += 1
-        seq_bytes = struct.pack(">Q", self.tx_seq)
-        
-        # Keystream encryption
-        keystream = self._aes_ctr_keystream(self.enc_key, seq_bytes, len(plaintext))
-        ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream))
-
-        # 16-byte HMAC-SHA256 tag
-        h = hmac.new(self.hmac_key, seq_bytes + ciphertext, hashlib.sha256)
-        tag = h.digest()[:16]
-
-        return seq_bytes + ciphertext + tag
-
-    def decrypt(self, packet: bytes) -> bytes:
-        """
-        Verifies HMAC and monotonic sequence nonce, then decrypts.
-        Returns plaintext bytes or None if corrupted/replayed.
-        """
-        if len(packet) < 24:
-            return None
-        seq_bytes = packet[:8]
-        tag = packet[-16:]
-        ciphertext = packet[8:-16]
-
-        # Verify HMAC tag first
-        h = hmac.new(self.hmac_key, seq_bytes + ciphertext, hashlib.sha256)
-        expected_tag = h.digest()[:16]
-        if not hmac.compare_digest(tag, expected_tag):
-            return None
-
-        # Replay protection
-        seq = struct.unpack(">Q", seq_bytes)[0]
-        if seq <= self.rx_seq_max and self.enforce_hmac:
-            return None
-        if seq > self.rx_seq_max:
-            self.rx_seq_max = seq
-
-        # Keystream decryption
-        keystream = self._aes_ctr_keystream(self.enc_key, seq_bytes, len(ciphertext))
-        plaintext = bytes(a ^ b for a, b in zip(ciphertext, keystream))
-        return plaintext
-
-
-# ============================================================================
-# WEBSOCKET PROTOCOL ENGINE (GUID-FREE HANDSHAKE OVER TOR)
-# ============================================================================
-
-class WebSocketStream:
-    """
-    RFC 6455 framing over a TCP socket with a clean, GUID-free HTTP upgrade.
-    """
-    OP_TEXT = 0x1
-    OP_BINARY = 0x2
-    OP_CLOSE = 0x8
-    OP_PING = 0x9
-    OP_PONG = 0xA
-
-    def __init__(self, sock: socket.socket, is_client: bool = True):
-        self.sock = sock
-        self.is_client = is_client
-        self.closed = False
-        self._set_tcp_nodelay()
-
-    def _set_tcp_nodelay(self):
-        try:
-            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except Exception:
-            pass
-
-    @classmethod
-    def client_handshake(cls, sock: socket.socket, host: str, port: int) -> 'WebSocketStream':
-        """Performs direct GUID-free HTTP/1.1 Upgrade request."""
-        req = (
-            f"GET /ws HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            f"Upgrade: websocket\r\n"
-            f"Connection: Upgrade\r\n"
-            f"\r\n"
-        ).encode("utf-8")
-        sock.sendall(req)
-
-        # Read HTTP response
-        response = b""
-        sock.settimeout(15.0)
-        while b"\r\n\r\n" not in response:
-            chunk = sock.recv(1024)
-            if not chunk:
-                raise ConnectionError("Connection closed during WebSocket handshake")
-            response += chunk
-
-        status_line = response.split(b"\r\n")[0].decode("utf-8", errors="ignore")
-        if "101" not in status_line:
-            raise ConnectionError(f"Handshake failed: {status_line}")
-
-        sock.settimeout(None)
-        return cls(sock, is_client=True)
-
-    @classmethod
-    def server_handshake(cls, sock: socket.socket) -> 'WebSocketStream':
-        """Receives HTTP Upgrade request and returns GUID-free 101 Switching Protocols."""
-        sock.settimeout(15.0)
-        req = b""
-        while b"\r\n\r\n" not in req:
-            chunk = sock.recv(1024)
-            if not chunk:
-                raise ConnectionError("Client disconnected during handshake")
-            req += chunk
-
-        resp = (
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "\r\n"
-        ).encode("utf-8")
-        sock.sendall(resp)
-        sock.settimeout(None)
-        return cls(sock, is_client=False)
-
-    def send_frame(self, opcode: int, payload: bytes):
-        """Encapsulates and transmits a WebSocket frame."""
-        if self.closed:
-            return
-        length = len(payload)
-        header = bytearray()
-        header.append(0x80 | (opcode & 0x0F))  # FIN bit + Opcode
-
-        # Framing with length
-        if length <= 125:
-            header.append(length)
-        elif length <= 65535:
-            header.append(126)
-            header.extend(struct.pack(">H", length))
-        else:
-            header.append(127)
-            header.extend(struct.pack(">Q", length))
-
-        try:
-            self.sock.sendall(bytes(header) + payload)
-        except Exception:
-            self.closed = True
-
-    def recv_frame(self) -> tuple:
-        """
-        Reads next complete WebSocket frame.
-        Returns (opcode, payload_bytes) or (None, None) on EOF/error.
-        """
-        if self.closed:
-            return None, None
-        try:
-            b1_b2 = self._recv_exact(2)
-            if not b1_b2:
-                return None, None
-            b1, b2 = b1_b2[0], b1_b2[1]
-            opcode = b1 & 0x0F
-            is_masked = bool(b2 & 0x80)
-            length = b2 & 0x7F
-
-            if length == 126:
-                ext = self._recv_exact(2)
-                if not ext:
-                    return None, None
-                length = struct.unpack(">H", ext)[0]
-            elif length == 127:
-                ext = self._recv_exact(8)
-                if not ext:
-                    return None, None
-                length = struct.unpack(">Q", ext)[0]
-
-            mask_key = None
-            if is_masked:
-                mask_key = self._recv_exact(4)
-                if not mask_key:
-                    return None, None
-
-            payload = self._recv_exact(length)
-            if payload is None:
-                return None, None
-
-            if is_masked and mask_key:
-                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
-
-            return opcode, payload
-        except Exception:
-            self.closed = True
-            return None, None
-
-    def _recv_exact(self, num_bytes: int) -> bytes:
-        data = bytearray()
-        while len(data) < num_bytes:
-            chunk = self.sock.recv(num_bytes - len(data))
-            if not chunk:
-                return None
-            data.extend(chunk)
-        return bytes(data)
-
-    def close(self):
-        if not self.closed:
-            self.closed = True
-            try:
-                self.send_frame(self.OP_CLOSE, b"")
-                self.sock.close()
-            except Exception:
-                pass
-
-
-# ============================================================================
-# SOCKS5 CONNECTOR (TOR ONION CONNECTIONS)
-# ============================================================================
-
-def connect_tor_socks5(onion_host: str, port: int, socks_host: str = "127.0.0.1", socks_port: int = 9050, timeout: float = 30.0) -> socket.socket:
-    """Establishes TCP connection to .onion host via Tor SOCKS5 proxy (RFC 1928)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect((socks_host, socks_port))
-
-    # Greeting: Version 5, 1 auth method (No Auth = 0x00)
-    s.sendall(b"\x05\x01\x00")
-    resp = s.recv(2)
-    if len(resp) != 2 or resp[0] != 0x05 or resp[1] != 0x00:
-        s.close()
-        raise ConnectionError(f"Tor SOCKS5 auth failed: {resp.hex() if resp else 'empty'}")
-
-    # Connect command (0x01), DOMAINNAME (0x03)
-    dest_bytes = onion_host.encode("utf-8")
-    req = b"\x05\x01\x00\x03" + bytes([len(dest_bytes)]) + dest_bytes + struct.pack(">H", port)
-    s.sendall(req)
-
-    # Response: 0x05, status, 0x00, addr_type...
-    resp = s.recv(4)
-    if len(resp) < 4 or resp[0] != 0x05 or resp[1] != 0x00:
-        status_code = resp[1] if len(resp) >= 2 else 0xFF
-        s.close()
-        raise ConnectionError(f"Tor SOCKS5 connection to {onion_host}:{port} failed (code 0x{status_code:02x})")
-
-    # Consume remaining bind address data
-    addr_type = resp[3]
-    if addr_type == 0x01:   # IPv4
-        s.recv(4 + 2)
-    elif addr_type == 0x03: # Domain
-        alen = s.recv(1)[0]
-        s.recv(alen + 2)
-    elif addr_type == 0x04: # IPv6
-        s.recv(16 + 2)
-
-    s.settimeout(None)
-    return s
-
-
-# ============================================================================
-# AUDIO HARDWARE I/O & JITTER BUFFER
-# ============================================================================
-
-class AudioPipeline:
-    """Platform-adaptive audio recording, playback, and adaptive jitter buffer."""
-    def __init__(self, sample_rate=16000, frame_duration_ms=60, is_termux=False, is_macos=False):
-        self.sample_rate = sample_rate
-        self.frame_duration_ms = frame_duration_ms
-        self.frame_size = int(sample_rate * (frame_duration_ms / 1000.0))
-        self.pcm_chunk_bytes = self.frame_size * 2  # 16-bit mono
-
-        self.is_termux = is_termux
-        self.is_macos = is_macos
-
-        self.rec_proc = None
-        self.play_proc = None
-        self.running = False
-        self.muted = False
-        self.jitter_queue = []
-        self.queue_lock = threading.Lock()
-
-    def start(self):
-        self.running = True
-        self._spawn_recording()
-        self._spawn_playback()
-
-    def _has_binary(self, name: str) -> bool:
-        for p in os.environ.get("PATH", "").split(os.pathsep):
-            fp = os.path.join(p, name)
-            if os.path.isfile(fp) and os.access(fp, os.X_OK):
-                return True
-        return False
-
-    def _spawn_recording(self):
-        """Spawns background low-latency recording process."""
-        try:
-            if self.is_macos:
-                cmd = ["rec", "-q", "-t", "raw", "-r", str(self.sample_rate), "-e", "signed", "-b", "16", "-c", "1", "-"]
-                self.rec_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-            elif self.is_termux:
-                # Termux live streaming: Start PulseAudio daemon and load OpenSL ES microphone module
-                try:
-                    subprocess.run(["pulseaudio", "--start", "--exit-idle-time=-1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
-                    subprocess.run(["pactl", "load-module", "module-sles-source"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2.0)
-                except Exception:
-                    pass
-
-                cmd = None
-                if self._has_binary("pacat"):
-                    cmd = ["pacat", "-r", "--format=s16le", "--channels=1", f"--rate={self.sample_rate}", "--latency-msec=40"]
-                elif self._has_binary("parec"):
-                    cmd = ["parec", "--format=s16le", "--channels=1", f"--rate={self.sample_rate}", "--latency-msec=40"]
-                elif self._has_binary("rec"):
-                    cmd = ["rec", "-q", "-t", "raw", "-r", str(self.sample_rate), "-e", "signed", "-b", "16", "-c", "1", "-"]
-
-                if cmd:
-                    self.rec_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-            else:
-                cmd = ["arecord", "-f", "S16_LE", "-r", str(self.sample_rate), "-c", "1", "-t", "raw", "-q", "-"]
-                self.rec_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-        except Exception:
-            try:
-                cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", ":0", "-f", "s16le", "-ar", str(self.sample_rate), "-ac", "1", "-"]
-                self.rec_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-            except Exception:
-                self.rec_proc = None
-
-    def _spawn_playback(self):
-        """Spawns background low-latency playback process."""
-        try:
-            if self.is_macos or self.is_termux:
-                cmd = ["play", "-q", "-t", "raw", "-r", str(self.sample_rate), "-e", "signed", "-b", "16", "-c", "1", "-"]
-            else:
-                cmd = ["aplay", "-f", "S16_LE", "-r", str(self.sample_rate), "-c", "1", "-q", "-"]
-
-            self.play_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-        except Exception:
-            self.play_proc = None
-
-    def read_mic_frame(self) -> bytes:
-        """Reads exactly one frame of raw PCM from the microphone."""
-        if not self.rec_proc or not self.rec_proc.stdout:
-            time.sleep(self.frame_duration_ms / 1000.0)
-            return b"\x00" * self.pcm_chunk_bytes
-
-        if self.muted:
-            try:
-                self.rec_proc.stdout.read(self.pcm_chunk_bytes)
-            except Exception:
-                pass
-            return b"\x00" * self.pcm_chunk_bytes
-
-        data = bytearray()
-        while len(data) < self.pcm_chunk_bytes and self.running:
-            try:
-                chunk = self.rec_proc.stdout.read(self.pcm_chunk_bytes - len(data))
-                if not chunk:
-                    time.sleep(0.005)
-                    break
-                data.extend(chunk)
-            except Exception:
-                break
-
-        if len(data) < self.pcm_chunk_bytes:
-            data.extend(b"\x00" * (self.pcm_chunk_bytes - len(data)))
-        return bytes(data)
-
-    def queue_inbound_pcm(self, pcm_data: bytes):
-        """Adds decoded PCM to the playback jitter buffer."""
-        with self.queue_lock:
-            if len(self.jitter_queue) > 4:
-                self.jitter_queue.pop(0)
-            self.jitter_queue.append(pcm_data)
-
-    def write_speaker_frame(self):
-        """Pulls next frame from jitter queue and feeds to speaker."""
-        pcm = None
-        with self.queue_lock:
-            if self.jitter_queue:
-                pcm = self.jitter_queue.pop(0)
-
-        if pcm and self.play_proc and self.play_proc.stdin:
-            try:
-                self.play_proc.stdin.write(pcm)
-                self.play_proc.stdin.flush()
-            except Exception:
-                pass
-        else:
-            time.sleep(0.005)
-
-    def toggle_mute(self) -> bool:
-        self.muted = not self.muted
-        return self.muted
-
-    def close(self):
-        self.running = False
-        if self.rec_proc:
-            try:
-                self.rec_proc.terminate()
-                self.rec_proc.wait(timeout=0.5)
-            except Exception:
-                pass
-        if self.play_proc:
-            try:
-                self.play_proc.terminate()
-                self.play_proc.wait(timeout=0.5)
-            except Exception:
-                pass
-
-
-# ============================================================================
-# FULL DUPLEX SESSION & INTERACTIVE TERMINAL UI
-# ============================================================================
-
-class FullDuplexSession:
-    def __init__(self, mode: str, remote_onion: str, listen_port: int, socks_port: int, shared_secret: str, cipher: str, hmac_auth: bool, is_termux: bool, is_macos: bool, single_hop: bool = False):
-        self.mode = mode  # "server" or "client"
-        self.remote_onion = remote_onion
-        self.listen_port = listen_port
-        self.socks_port = socks_port
-        self.shared_secret = shared_secret
-        self.cipher = cipher
-        self.hmac_auth = hmac_auth
-        self.is_termux = is_termux
-        self.is_macos = is_macos
-        self.single_hop = single_hop
-
-        self.running = True
-        self.stream = None
-        self.codec = OpusCodec(sample_rate=16000, channels=1, bitrate=16000)
-        self.crypto = CryptoEngine(shared_secret, cipher, hmac_auth)
-        self.audio = AudioPipeline(sample_rate=16000, frame_duration_ms=60, is_termux=is_termux, is_macos=is_macos)
-
-        # Telemetry & UI state
-        self.rtt_ms = 0
-        self.tx_bytes_sec = 0
-        self.rx_bytes_sec = 0
-        self.tx_count = 0
-        self.rx_count = 0
-        self.remote_speaking = False
-        self.last_rx_time = 0
-        self.chat_messages = []
-        self.status_msg = "Connected"
-        self.remote_cipher = cipher
-
-    def start(self):
-        self.orig_term = None
-        try:
-            self.orig_term = termios.tcgetattr(sys.stdin.fileno())
-            tty.setcbreak(sys.stdin.fileno())
-        except Exception:
-            pass
-
-        try:
-            self._connect()
-            self.audio.start()
-
-            threads = [
-                threading.Thread(target=self._tx_worker, daemon=True),
-                threading.Thread(target=self._rx_worker, daemon=True),
-                threading.Thread(target=self._playback_worker, daemon=True),
-                threading.Thread(target=self._ping_worker, daemon=True),
-                threading.Thread(target=self._telemetry_worker, daemon=True),
-            ]
-            for t in threads:
-                t.start()
-
-            self._ui_loop()
-        finally:
-            self.running = False
-            self.audio.close()
-            self.codec.close()
-            if self.stream:
-                self.stream.close()
-            if self.orig_term:
-                try:
-                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.orig_term)
-                except Exception:
-                    pass
-            print("\033[?25h\n  \033[1;33mCall ended cleanly.\033[0m\n")
-
-    def _connect(self):
-        if self.mode == "server":
-            self.status_msg = f"Listening on port {self.listen_port}..."
-            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind(("127.0.0.1", self.listen_port))
-            srv.listen(1)
-            conn, _ = srv.accept()
-            srv.close()
-            self.status_msg = "Client connected. Handshaking..."
-            self.stream = WebSocketStream.server_handshake(conn)
-        else:
-            self.status_msg = f"Connecting to {self.remote_onion} via Tor SOCKS5..."
-            sock = connect_tor_socks5(self.remote_onion, self.listen_port, socks_host="127.0.0.1", socks_port=self.socks_port)
-            self.status_msg = "Tor connected. Handshaking WebSockets..."
-            self.stream = WebSocketStream.client_handshake(sock, self.remote_onion, self.listen_port)
-
-        self.stream.send_frame(WebSocketStream.OP_TEXT, f"CIPHER:{self.cipher}".encode("utf-8"))
-        self.status_msg = "Call Active"
-
-    def _tx_worker(self):
-        while self.running and not self.stream.closed:
-            pcm = self.audio.read_mic_frame()
-            if not pcm:
-                continue
-
-            compressed = self.codec.encode(pcm, self.audio.frame_size)
-            if not compressed:
-                continue
-
-            encrypted = self.crypto.encrypt(compressed)
-            if encrypted:
-                self.stream.send_frame(WebSocketStream.OP_BINARY, encrypted)
-                self.tx_count += len(encrypted)
-
-    def _rx_worker(self):
-        while self.running and not self.stream.closed:
-            opcode, payload = self.stream.recv_frame()
-            if opcode is None:
-                break
-
-            if opcode == WebSocketStream.OP_BINARY:
-                decrypted = self.crypto.decrypt(payload)
-                if decrypted:
-                    self.rx_count += len(payload)
-                    self.last_rx_time = time.time()
-                    self.remote_speaking = True
-
-                    pcm = self.codec.decode(decrypted, self.audio.frame_size)
-                    if pcm:
-                        self.audio.queue_inbound_pcm(pcm)
-
-            elif opcode == WebSocketStream.OP_TEXT:
-                try:
-                    text = payload.decode("utf-8", errors="ignore")
-                    if text.startswith("CIPHER:"):
-                        self.remote_cipher = text.split(":", 1)[1]
-                    elif text.startswith("MSG:"):
-                        msg = text.split(":", 1)[1]
-                        self.chat_messages.append(f"\033[1;35m[Remote]\033[0m {msg}")
-                    elif text.startswith("HANGUP"):
-                        self.status_msg = "Remote hung up."
-                        self.running = False
-                        break
-                except Exception:
-                    pass
-
-            elif opcode == WebSocketStream.OP_PING:
-                self.stream.send_frame(WebSocketStream.OP_PONG, payload)
-
-            elif opcode == WebSocketStream.OP_PONG:
-                try:
-                    sent_time = struct.unpack(">d", payload)[0]
-                    self.rtt_ms = max(1, int((time.time() - sent_time) * 1000))
-                except Exception:
-                    pass
-
-            elif opcode == WebSocketStream.OP_CLOSE:
-                self.status_msg = "Remote disconnected."
-                self.running = False
-                break
-
-        self.running = False
-
-    def _playback_worker(self):
-        while self.running:
-            self.audio.write_speaker_frame()
-
-    def _ping_worker(self):
-        while self.running and not self.stream.closed:
-            time.sleep(2.0)
-            try:
-                now_bytes = struct.pack(">d", time.time())
-                self.stream.send_frame(WebSocketStream.OP_PING, now_bytes)
-            except Exception:
-                break
-
-    def _telemetry_worker(self):
-        last_t = time.time()
-        while self.running:
-            time.sleep(1.0)
-            now = time.time()
-            dt = max(0.1, now - last_t)
-            self.tx_bytes_sec = int((self.tx_count * 8) / (dt * 1000))
-            self.rx_bytes_sec = int((self.rx_count * 8) / (dt * 1000))
-            self.tx_count = 0
-            self.rx_count = 0
-            last_t = now
-
-            if now - self.last_rx_time > 0.4:
-                self.remote_speaking = False
-
-    def _ui_loop(self):
-        print("\033[?25l\033[2J\033[H", end="")
-        while self.running:
-            self._render_dashboard()
-            r, _, _ = select.select([sys.stdin], [], [], 0.15)
-            if r:
-                ch = sys.stdin.read(1)
-                if ch in ['q', 'Q']:
-                    try:
-                        self.stream.send_frame(WebSocketStream.OP_TEXT, b"HANGUP")
-                    except Exception:
-                        pass
-                    self.running = False
-                    break
-                elif ch in ['m', 'M']:
-                    self.audio.toggle_mute()
-                elif ch in ['t', 'T']:
-                    self._send_chat_dialog()
-
-    def _render_dashboard(self):
-        out = []
-        out.append("\033[H")
-        out.append(f"  \033[1;36m═══ TerminalPhone v1.1.9 — Full Duplex Call ═══\033[0m\033[K\n")
-        
-        target = self.remote_onion if self.mode == "client" else "Incoming Caller"
-        routing_label = "\033[1;33mTurbo Single-Hop (4 Hops)\033[0m" if self.single_hop else "\033[1;32mStandard (6 Hops)\033[0m"
-        out.append(f"  \033[2mTarget:      \033[0m\033[1;37m{target}\033[0m\033[K\n")
-        out.append(f"  \033[2mMode:        \033[0m\033[1;32mFull Duplex WebSockets\033[0m  \033[2m[{routing_label}\033[2m]\033[0m\033[K\n")
-
-        c_match = "\033[1;32m● Matched\033[0m" if self.cipher == self.remote_cipher else "\033[1;31m● Mismatch\033[0m"
-        out.append(f"  \033[2mCipher:      \033[0m\033[1;37m{self.cipher.upper()}\033[0m  {c_match}\033[K\n")
-
-        rtt_color = "\033[1;32m" if self.rtt_ms < 350 else ("\033[1;33m" if self.rtt_ms < 600 else "\033[1;31m")
-        rtt_str = f"{rtt_color}{self.rtt_ms} ms\033[0m" if self.rtt_ms > 0 else "\033[2mMeasuring...\033[0m"
-        out.append(f"  \033[2mTor Latency: \033[0m{rtt_str}  \033[2m(RTT)\033[0m\033[K\n")
-
-        mic_status = "\033[1;33m[MUTED]\033[0m" if self.audio.muted else "\033[1;32m● LIVE\033[0m"
-        rx_status = "\033[1;32m● Receiving\033[0m" if self.remote_speaking else "\033[2mIdle\033[0m"
-        out.append(f"  \033[2mMicrophone:  \033[0m{mic_status}  \033[2m({self.tx_bytes_sec} kbps)\033[0m\033[K\n")
-        out.append(f"  \033[2mRemote Audio:\033[0m{rx_status}  \033[2m({self.rx_bytes_sec} kbps)\033[0m\033[K\n")
-        out.append(f"  \033[2mStatus:      \033[0m\033[1;37m{self.status_msg}\033[0m\033[K\n\n")
-
-        out.append(f"  \033[1;36m── Chat Messages ───────────────────────────────\033[0m\033[K\n")
-        recent_chat = self.chat_messages[-4:]
-        for i in range(4):
-            if not self.chat_messages and i == 0:
-                out.append("  \033[2m(No messages yet. Press [T] to send text chat)\033[0m\033[K\n")
-            elif i < len(recent_chat):
-                out.append(f"  {recent_chat[i]}\033[K\n")
-            else:
-                out.append("\033[K\n")
-        out.append(f"  \033[1;36m────────────────────────────────────────────────\033[0m\033[K\n\n")
-
-        out.append(f"  \033[1;32m[M]\033[0m Mute/Unmute  \033[1;32m[T]\033[0m Chat  \033[1;31m[Q]\033[0m Hang up\033[K\n\033[J")
-        print("".join(out), end="", flush=True)
-
-    def _send_chat_dialog(self):
-        if self.orig_term:
-            try:
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self.orig_term)
-            except Exception:
-                pass
-        print("\033[?25h\r\033[K\n  \033[1;36mType message (Enter to send, Empty/Esc to cancel):\033[0m\n  > ", end="", flush=True)
-        try:
-            msg = sys.stdin.readline().strip()
-        except Exception:
-            msg = ""
-        finally:
-            if self.orig_term:
-                try:
-                    tty.setcbreak(sys.stdin.fileno())
-                except Exception:
-                    pass
-            print("\033[?25l\033[2J\033[H", end="", flush=True)
-
-        if msg and self.stream and not self.stream.closed:
-            self.stream.send_frame(WebSocketStream.OP_TEXT, f"MSG:{msg}".encode("utf-8"))
-            self.chat_messages.append(f"\033[1;32m[You]\033[0m {msg}")
-        self._render_dashboard()
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: terminalphone_ws.py <server|client> [options]")
-        sys.exit(1)
-
-    mode = sys.argv[1]
-    remote_onion = sys.argv[2] if len(sys.argv) > 2 else ""
-    listen_port = int(sys.argv[3]) if len(sys.argv) > 3 else 7777
-    socks_port = int(sys.argv[4]) if len(sys.argv) > 4 else 9050
-    shared_secret = sys.argv[5] if len(sys.argv) > 5 else "default_secret"
-    cipher = sys.argv[6] if len(sys.argv) > 6 else "aes-256-cbc"
-    hmac_auth = (sys.argv[7] == "1") if len(sys.argv) > 7 else False
-    is_termux = (sys.argv[8] == "1") if len(sys.argv) > 8 else False
-    is_macos = (sys.argv[9] == "1") if len(sys.argv) > 9 else False
-    single_hop = (sys.argv[10] == "1") if len(sys.argv) > 10 else False
-
-    session = FullDuplexSession(
-        mode=mode,
-        remote_onion=remote_onion,
-        listen_port=listen_port,
-        socks_port=socks_port,
-        shared_secret=shared_secret,
-        cipher=cipher,
-        hmac_auth=hmac_auth,
-        is_termux=is_termux,
-        is_macos=is_macos,
-        single_hop=single_hop
-    )
-    session.start()
-
-if __name__ == "__main__":
-    main()
-EOF
-    chmod 700 "$WS_ENGINE_FILE"
-}
-
-#=============================================================================
 # AUDIO PIPELINE
 #=============================================================================
 
@@ -2118,7 +1207,7 @@ cleanup_call() {
     done
 
     # Kill recording process if active
-    if [ -n "${REC_PID:-}" ]; then
+    if [ -n "$REC_PID" ]; then
         kill "$REC_PID" 2>/dev/null || true
         kill -9 "$REC_PID" 2>/dev/null || true
         REC_PID=""
@@ -2128,7 +1217,7 @@ cleanup_call() {
     sleep 0.2
 
     # Kill volume monitor if active
-    if [ -n "${VOL_MON_PID:-}" ]; then
+    if [ -n "$VOL_MON_PID" ]; then
         kill "$VOL_MON_PID" 2>/dev/null || true
         kill -9 "$VOL_MON_PID" 2>/dev/null || true
         VOL_MON_PID=""
@@ -2148,7 +1237,7 @@ cleanup_call() {
     overwrite_rm "$DATA_DIR/run/vol_ptt_trigger_$$"
 
     # Kill circuit refresh if active
-    if [ -n "${CIRCUIT_REFRESH_PID:-}" ]; then
+    if [ -n "$CIRCUIT_REFRESH_PID" ]; then
         kill "$CIRCUIT_REFRESH_PID" 2>/dev/null || true
         CIRCUIT_REFRESH_PID=""
     fi
@@ -2304,24 +1393,6 @@ listen_for_call() {
     # Stop auto-listener if running (we'll do manual listen)
     stop_auto_listener
 
-    if [ "$FULL_DUPLEX" -eq 1 ]; then
-        local onion
-        onion=$(get_onion)
-        local fd_title="Full Duplex WebSockets (Standard 6-Hop)"
-        [ "$SINGLE_HOP" -eq 1 ] && fd_title="Full Duplex WebSockets (Turbo Single-Hop)"
-        echo -e "\n${BOLD}${CYAN}═══ Listening for Calls ($fd_title) ═══${NC}\n"
-        echo -e "  ${GREEN}Your address:${NC} ${BOLD}${WHITE}$onion${NC}"
-        echo -e "  ${GREEN}Listening on:${NC} port $LISTEN_PORT"
-        [ "$SINGLE_HOP" -eq 1 ] && echo -e "  ${YELLOW}Routing:${NC}      ${YELLOW}Turbo Single-Hop (4 Hops — Server Anonymity Disabled)${NC}"
-        echo -e "\n  ${DIM}Share your .onion address with the caller.${NC}"
-        echo -e "  ${DIM}[Q] Cancel / Hang up${NC}\n"
-        build_ws_engine
-        python3 "$WS_ENGINE_FILE" server "" "$LISTEN_PORT" "$TOR_SOCKS_PORT" "$SHARED_SECRET" "$CIPHER" "$HMAC_AUTH" "$IS_TERMUX" "$IS_MACOS" "$SINGLE_HOP"
-        cleanup_call
-        start_auto_listener
-        return 0
-    fi
-
     local onion
     onion=$(get_onion)
     echo -e "\n${BOLD}${CYAN}═══ Listening for Calls ═══${NC}\n"
@@ -2417,34 +1488,7 @@ call_remote() {
         remote_onion="${remote_onion}.onion"
     fi
 
-    # Check if single-hop mode is enabled on this node (SOCKS proxy disabled)
-    if [ "$SINGLE_HOP" -eq 1 ]; then
-        echo -e "\n  ${YELLOW}${BOLD}⚠  Single-Hop Mode is Active${NC}"
-        echo -e "  ${DIM}In single-hop mode, Tor disables the SOCKS client proxy (${TOR_SOCKS_PORT}).${NC}"
-        echo -e "  ${DIM}This node can receive calls, but cannot initiate outbound calls.${NC}\n"
-        echo -ne "  ${BOLD}Switch to Standard Mode and restart Tor to make this call? [Y/n]: ${NC}"
-        read -r _switch_sh
-        if [ "$_switch_sh" != "n" ] && [ "$_switch_sh" != "N" ]; then
-            SINGLE_HOP=0
-            save_config
-            log_info "Switching to Standard mode (restoring SOCKS proxy)..."
-            stop_tor
-            start_tor || return 1
-        else
-            log_warn "Call cancelled (outbound calls unavailable in single-hop mode)"
-            return 1
-        fi
-    fi
-
     start_tor || return 1
-
-    if [ "$FULL_DUPLEX" -eq 1 ]; then
-        echo -e "\n  ${DIM}Connecting to ${remote_onion}:${LISTEN_PORT} via Tor WebSockets (Full Duplex)...${NC}"
-        build_ws_engine
-        python3 "$WS_ENGINE_FILE" client "$remote_onion" "$LISTEN_PORT" "$TOR_SOCKS_PORT" "$SHARED_SECRET" "$CIPHER" "$HMAC_AUTH" "$IS_TERMUX" "$IS_MACOS" "$SINGLE_HOP"
-        cleanup_call
-        return 0
-    fi
 
     echo -e "\n  ${DIM}Connecting to ${remote_onion}:${LISTEN_PORT} via Tor...${NC}"
 
@@ -3185,13 +2229,13 @@ in_call_session() {
 
         elif [ "$key" = "q" ] || [ "$key" = "Q" ]; then
             # If recording, cancel it
-            if [ $ptt_active -eq 1 ] && [ -n "${REC_PID:-}" ]; then
+            if [ $ptt_active -eq 1 ] && [ -n "$REC_PID" ]; then
                 if [ $IS_TERMUX -eq 1 ]; then
                     termux-microphone-record -q &>/dev/null || true
                 fi
                 kill "$REC_PID" 2>/dev/null || true
                 wait "$REC_PID" 2>/dev/null || true
-                overwrite_rm "${REC_FILE:-}"
+                overwrite_rm "$REC_FILE"
                 REC_PID=""
                 REC_FILE=""
             fi
@@ -3419,23 +2463,12 @@ show_status() {
     fi
 
     # Config
-    local mode_str="Push-to-Talk"
-    if [ "$FULL_DUPLEX" -eq 1 ]; then
-        if [ "$SINGLE_HOP" -eq 1 ]; then
-            mode_str="Full Duplex (Turbo Single-Hop WebSockets)"
-        else
-            mode_str="Full Duplex (Standard 6-Hop WebSockets)"
-        fi
-    fi
-    local ptt_disp="SPACEBAR"
-    [ "$PTT_KEY" != " " ] && ptt_disp="$PTT_KEY"
-    echo -e "\n  ${DIM}Mode:         $mode_str${NC}"
-    echo -e "  ${DIM}Listen port:  $LISTEN_PORT${NC}"
+    echo -e "\n  ${DIM}Listen port:  $LISTEN_PORT${NC}"
     echo -e "  ${DIM}SOCKS port:   $TOR_SOCKS_PORT${NC}"
     echo -e "  ${DIM}Cipher:       $CIPHER${NC}"
     echo -e "  ${DIM}Opus bitrate: ${OPUS_BITRATE}kbps${NC}"
     echo -e "  ${DIM}Opus frame:   ${OPUS_FRAMESIZE}ms${NC}"
-    echo -e "  ${DIM}PTT key:      [$ptt_disp]${NC}"
+    echo -e "  ${DIM}PTT key:      [SPACEBAR]${NC}"
     echo ""
 }
 
@@ -3600,16 +2633,6 @@ settings_menu() {
             sd_label="${GREEN}enabled${NC}"
         fi
         echo -e "  ${DIM}Overwrite+del:        ${NC}${sd_label}"
-
-        local fd_label="${RED}disabled (Push-to-Talk)${NC}"
-        if [ "$FULL_DUPLEX" -eq 1 ]; then
-            if [ "$SINGLE_HOP" -eq 1 ]; then
-                fd_label="${YELLOW}enabled (Turbo Single-Hop WebSockets)${NC}"
-            else
-                fd_label="${GREEN}enabled (Standard 6-Hop WebSockets)${NC}"
-            fi
-        fi
-        echo -e "  ${DIM}Full duplex:          ${NC}${fd_label}"
         echo ""
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Change Opus encoding quality"
@@ -3622,7 +2645,6 @@ settings_menu() {
         echo -e "  ${BOLD}${WHITE}6${NC} ${CYAN}│${NC} PTT chime ${DIM}(notification sound when remote starts recording)${NC}"
         echo -e "  ${BOLD}${WHITE}7${NC} ${CYAN}│${NC} Tor settings"
         echo -e "  ${BOLD}${WHITE}8${NC} ${CYAN}│${NC} Security"
-        echo -e "  ${BOLD}${WHITE}9${NC} ${CYAN}│${NC} Full duplex mode ${DIM}(WebSockets bidirectional audio)${NC}"
         echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to main menu${NC}"
         echo ""
         echo -ne "  ${BOLD}Select: ${NC}"
@@ -3703,175 +2725,10 @@ settings_menu() {
             6) settings_chime ;;
             7) settings_tor ;;
             8) settings_security ;;
-            9) settings_full_duplex ;;
             0|q|Q) return ;;
             *)
                 echo -e "\n  ${RED}Invalid choice${NC}"
                 sleep 1
-                ;;
-        esac
-    done
-}
-
-settings_full_duplex_mode_select() {
-    clear
-    echo -e "\n${BOLD}${CYAN}═══ Select Full Duplex Routing Mode ═══${NC}\n"
-    echo -e "  ${DIM}Choose the Tor circuit routing mode for Full Duplex WebSockets:${NC}\n"
-
-    echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} ${GREEN}${BOLD}Standard Mode${NC} ${DIM}(6 Hops — Maximum Anonymity)${NC}"
-    echo -e "      ${DIM}• Standard 3-hop client + 3-hop hidden service (6 relays total)${NC}"
-    echo -e "      ${DIM}• Complete location anonymity preserved for both caller & listener${NC}"
-    echo -e "      ${DIM}• SOCKS proxy active (can make and receive calls)${NC}"
-    echo -e "      ${DIM}• Expected Latency: ~800–1200ms RTT${NC}\n"
-
-    echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} ${YELLOW}${BOLD}Turbo Mode${NC} ${DIM}(Single-Hop — Low Latency)${NC}"
-    echo -e "      ${DIM}• Reduces listener circuit to 1 hop (4 relays total)${NC}"
-    echo -e "      ${DIM}• Cuts RTT latency down to ~450–700ms for natural conversation${NC}"
-    echo -e "      ${RED}• ⚠ Server Anonymity:${NC} ${DIM}Listener's real IP is visible to entry/RP relay${NC}"
-    echo -e "      ${RED}• ⚠ SOCKS Proxy:${NC} ${DIM}Outbound dialing disabled while in Single-Hop mode${NC}"
-    echo -e "      ${DIM}• Best for: Hosting a line / receiving incoming calls${NC}\n"
-
-    echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Cancel / Back${NC}\n"
-    echo -ne "  ${BOLD}Select: ${NC}"
-    read -r _fd_mode_choice
-
-    case "$_fd_mode_choice" in
-        1)
-            local prev_sh=$SINGLE_HOP
-            FULL_DUPLEX=1
-            SINGLE_HOP=0
-            save_config
-            log_ok "Full Duplex enabled in Standard Mode (6 Hops, Full Anonymity)"
-            if [ "$prev_sh" -eq 1 ] && [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
-                echo ""
-                echo -ne "  ${BOLD}Tor was running in Single-Hop mode. Restart Tor now to apply Standard mode? [Y/n]: ${NC}"
-                read -r _restart_tor_choice
-                if [ "$_restart_tor_choice" != "n" ] && [ "$_restart_tor_choice" != "N" ]; then
-                    stop_tor
-                    start_tor
-                else
-                    echo -e "  ${DIM}Remember to restart Tor before calling or listening.${NC}"
-                fi
-            fi
-            sleep 1
-            ;;
-        2)
-            clear
-            echo -e "\n${BOLD}${YELLOW}═══ ⚠  Turbo Mode (Single-Hop) Tradeoffs ═══${NC}\n"
-            echo -e "  ${DIM}Please review the security and operational tradeoffs before enabling:${NC}\n"
-            echo -e "  ${RED}•${NC} ${BOLD}Server Location Anonymity is Disabled:${NC}"
-            echo -e "    ${DIM}Your real IP is exposed to your Tor guard / rendezvous relay.${NC}"
-            echo -e "    ${DIM}The incoming caller remains 100% anonymous (they still use 3 hops).${NC}\n"
-            echo -e "  ${RED}•${NC} ${BOLD}SOCKS Client Proxy is Disabled:${NC}"
-            echo -e "    ${DIM}Tor requires SocksPort 0 in single-hop mode. You cannot make outbound${NC}"
-            echo -e "    ${DIM}calls while in this mode — only receive them.${NC}\n"
-            echo -e "  ${GREEN}•${NC} ${BOLD}Significantly Lower Latency:${NC}"
-            echo -e "    ${DIM}Drops RTT from ~1000ms to ~500ms, making two-way conversation fluid.${NC}\n"
-            echo -ne "  ${BOLD}Enable Turbo Mode (Single-Hop)? [y/N]: ${NC}"
-            read -r _turbo_confirm
-            if [ "$_turbo_confirm" = "y" ] || [ "$_turbo_confirm" = "Y" ]; then
-                local prev_sh=$SINGLE_HOP
-                FULL_DUPLEX=1
-                SINGLE_HOP=1
-                save_config
-                log_ok "Full Duplex enabled in Turbo Mode (Single-Hop, Low Latency)"
-                if [ "$prev_sh" -ne 1 ] && [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
-                    echo ""
-                    echo -ne "  ${BOLD}Tor must be restarted to apply Single-Hop mode. Restart Tor now? [Y/n]: ${NC}"
-                    read -r _restart_tor_choice
-                    if [ "$_restart_tor_choice" != "n" ] && [ "$_restart_tor_choice" != "N" ]; then
-                        stop_tor
-                        start_tor
-                    else
-                        echo -e "  ${DIM}Remember to restart Tor before listening for calls.${NC}"
-                    fi
-                fi
-            else
-                log_info "Turbo Mode cancelled"
-            fi
-            sleep 1
-            ;;
-        *)
-            return
-            ;;
-    esac
-}
-
-settings_full_duplex() {
-    while true; do
-        clear
-        echo -e "\n${BOLD}${CYAN}═══ Full Duplex Mode (WebSockets) ═══${NC}\n"
-        echo -e "  ${DIM}Full duplex enables real-time continuous two-way audio streaming over Tor${NC}"
-        echo -e "  ${DIM}via WebSockets without holding the spacebar or push-to-talk.${NC}"
-        echo -e "  ${DIM}Both parties can speak and listen simultaneously in real-time.${NC}\n"
-
-        echo -e "  ${YELLOW}${BOLD}⚠  TRADEOFFS & CONSIDERATIONS:${NC}\n"
-        echo -e "  ${RED}•${NC} ${BOLD}Traffic Flow Fingerprinting:${NC}"
-        echo -e "    ${DIM}Continuous bidirectional packet flow creates an observable VoIP timing pattern${NC}"
-        echo -e "    ${DIM}for local network observers / ISPs (PTT is silent on the wire between bursts).${NC}"
-        echo -e "  ${RED}•${NC} ${BOLD}Tor Latency & Routing:${NC}"
-        echo -e "    ${DIM}Standard mode routes through 6 relays (~800–1200ms RTT). Turbo single-hop${NC}"
-        echo -e "    ${DIM}mode reduces this to 4 relays (~450–700ms RTT) with reduced server anonymity.${NC}"
-        echo -e "  ${RED}•${NC} ${BOLD}Always-Live Microphone:${NC}"
-        echo -e "    ${DIM}The microphone transmits continuously unless muted ([M]), capturing background noise.${NC}"
-        echo -e "  ${RED}•${NC} ${BOLD}Battery & Bandwidth Usage:${NC}"
-        echo -e "    ${DIM}Continuous Opus DSP and encryption increase CPU and battery drain on mobile/Termux.${NC}"
-        echo -e "  ${RED}•${NC} ${BOLD}Mutual Requirement:${NC}"
-        echo -e "    ${DIM}Both caller and listener MUST enable Full Duplex in Settings before connecting.${NC}\n"
-
-        echo -e "  ${GREEN}•${NC} ${BOLD}Benefits:${NC} ${DIM}Natural hands-free conversation, simultaneous speaking, live RTT monitor.${NC}\n"
-
-        local status_str="${RED}${BOLD}DISABLED (Push-to-Talk)${NC}"
-        if [ "$FULL_DUPLEX" -eq 1 ]; then
-            if [ "$SINGLE_HOP" -eq 1 ]; then
-                status_str="${YELLOW}${BOLD}ENABLED — Turbo Mode (Single-Hop, Low Latency)${NC}"
-            else
-                status_str="${GREEN}${BOLD}ENABLED — Standard Mode (6 Hops, Full Anonymity)${NC}"
-            fi
-        fi
-        echo -e "  Current status: ${status_str}\n"
-
-        if [ "$FULL_DUPLEX" -eq 1 ]; then
-            echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Switch to Push-to-Talk (half-duplex)"
-            echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Change Routing Mode (Standard vs Turbo Single-Hop)"
-        else
-            echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Enable Full Duplex (WebSockets)"
-        fi
-        echo -e "  ${BOLD}${WHITE}0${NC} ${CYAN}│${NC} ${DIM}Back to Settings${NC}\n"
-        echo -ne "  ${BOLD}Select: ${NC}"
-        read -r fd_choice
-        case "$fd_choice" in
-            1)
-                if [ "$FULL_DUPLEX" -eq 1 ]; then
-                    local prev_sh=$SINGLE_HOP
-                    FULL_DUPLEX=0
-                    save_config
-                    log_ok "Full Duplex disabled — using Push-to-Talk"
-                    if [ "$prev_sh" -eq 1 ] && [ -n "$TOR_PID" ] && kill -0 "$TOR_PID" 2>/dev/null; then
-                        echo ""
-                        echo -ne "  ${BOLD}Tor was in Single-Hop mode. Restore standard Tor routing and restart? [Y/n]: ${NC}"
-                        read -r _rst_sh
-                        if [ "$_rst_sh" != "n" ] && [ "$_rst_sh" != "N" ]; then
-                            SINGLE_HOP=0
-                            save_config
-                            stop_tor
-                            start_tor
-                        fi
-                    fi
-                    sleep 1
-                else
-                    settings_full_duplex_mode_select
-                fi
-                ;;
-            2)
-                if [ "$FULL_DUPLEX" -eq 1 ]; then
-                    settings_full_duplex_mode_select
-                fi
-                ;;
-            0|q|Q)
-                return
-                ;;
-            *)
                 ;;
         esac
     done
@@ -4858,15 +3715,7 @@ show_banner() {
     echo -e "  ${TOR_PURPLE}${BOLD}Encrypted Voice & Chat${NC} ${DIM}over${NC} ${TOR_PURPLE}${BOLD}Tor${NC} ${DIM}Hidden Services${NC}"
     echo -e "  ${TOR_PURPLE}───────────────────────────────────────${NC}"
     local cipher_display="$(to_upper "$CIPHER")"
-    local mode_display="Push-to-Talk"
-    if [ "$FULL_DUPLEX" -eq 1 ]; then
-        if [ "$SINGLE_HOP" -eq 1 ]; then
-            mode_display="Full Duplex (Turbo 1-Hop)"
-        else
-            mode_display="Full Duplex (Standard 6-Hop)"
-        fi
-    fi
-    echo -e "  ${DIM}v${VERSION} | ${mode_display} | End-to-End ${cipher_display}${NC}\n"
+    echo -e "  ${DIM}v${VERSION} | Push-to-Talk | End-to-End ${cipher_display}${NC}\n"
 }
 
 main_menu() {
@@ -4890,18 +3739,10 @@ main_menu() {
         if [ "$AUTO_LISTEN" -eq 1 ]; then
             al_status="${GREEN}●${NC}"
         fi
-        local mode_status="${GREEN}PTT${NC}"
-        if [ "$FULL_DUPLEX" -eq 1 ]; then
-            if [ "$SINGLE_HOP" -eq 1 ]; then
-                mode_status="${YELLOW}FullDuplex(Turbo)${NC}"
-            else
-                mode_status="${GREEN}FullDuplex(Std)${NC}"
-            fi
-        fi
         local _ptt_d="SPACE"
         [ "$PTT_KEY" != " " ] && _ptt_d="$PTT_KEY"
 
-        echo -e "  ${DIM}Tor:${NC} $tor_status  ${DIM}Secret:${NC} $secret_status  ${DIM}SF:${NC} $sf_status  ${DIM}AL:${NC} $al_status  ${DIM}Mode:${NC} $mode_status  ${DIM}PTT:${NC} ${GREEN}[${_ptt_d}]${NC}\n"
+        echo -e "  ${DIM}Tor:${NC} $tor_status  ${DIM}Secret:${NC} $secret_status  ${DIM}SF:${NC} $sf_status  ${DIM}AL:${NC} $al_status  ${DIM}PTT:${NC} ${GREEN}[${_ptt_d}]${NC}\n"
 
         echo -e "  ${BOLD}${WHITE}1${NC} ${CYAN}│${NC} Listen for calls"
         echo -e "  ${BOLD}${WHITE}2${NC} ${CYAN}│${NC} Call an onion address"
@@ -5071,9 +3912,8 @@ main_menu() {
 
 trap cleanup EXIT INT TERM
 
-# Create data directories and build WebSocket engine
+# Create data directories
 mkdir -p "$DATA_DIR" "$AUDIO_DIR" "$PID_DIR" "$DATA_DIR/run"
-build_ws_engine
 
 # Clean any stale run files from previous sessions
 overwrite_rm "$DATA_DIR/run/"*
