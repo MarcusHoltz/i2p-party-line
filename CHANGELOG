@@ -295,3 +295,8 @@ Integrated Turbo Mode (Single-Hop) for Full Duplex Mode:
 - Automated Tor Restart Prompts: Prompts to restart Tor automatically when switching between Standard and Turbo Single-Hop modes so configuration changes take effect immediately.
 - UI Telemetry & Dashboard Integration: Main menu status banner, Settings menu, call screens, and the interactive Python WebSocket call dashboard now reflect whether Standard (6 Hops) or Turbo Single-Hop (4 Hops) routing is active.
 
+
+Version 1.1.7 9-15-26 
+ 
+Contributor noted there are issues with the encryption in the new websockets feature. I am just rolling back to 1.1.7 until I have more time. I think its eventually the correct way to do realtime full duplex, but the crypto needs worked on and tested further before including it.
+
