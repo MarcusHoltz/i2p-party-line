@@ -1,13 +1,27 @@
+# ─── Images / media ───────────────────────────────────────────────────────────
+*.svg
+
 # ─── Project runtime data ─────────────────────────────────────────────────────
-# All persistent data lives here. data/script/ = Host OS, data/docker/ = Docker.
+# All runtime state lives here. data/script/ = Host OS, data/docker/ = Docker.
+# This covers both the persistent identity (partyline-keys.dat) and the
+# deliberately ephemeral i2pd datadir (data/*/run/i2pd/: netDb, peer profiles,
+# router identity, generated i2pd.conf/tunnels.conf, i2pd.log).
 data/
-# Script-mode runtime dir: Tor hidden-service keys, shared_secret, torrc, pids.
-.torpartyline/
+# Script-mode runtime dir: I2P destination key, shared_secret, i2pd config, pids.
+.i2ppartyline/
+
+# ─── I2P key material — belt and braces ───────────────────────────────────────
+# These already live under data/, but committing your destination key would let
+# anyone impersonate your .b32.i2p address permanently, so match it by name too
+# in case someone runs the script with a relocated DATA_DIR.
+*-keys.dat
+partyline-keys.dat
+# Generated on every start from your settings; never worth committing.
+i2pd.conf
+tunnels.conf
 
 # ─── Secrets & environment ────────────────────────────────────────────────────
-secrets/*
-# keep the dir on clone so Docker's bind mount has a host path; ignore everything inside (incl. the real secret)
-!secrets/.gitkeep
+secrets/
 .env
 .env.*
 # keep the committed template; .env.* above would swallow it without this exception
