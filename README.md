@@ -100,6 +100,79 @@ separate entrypoint script is needed: the Dockerfile's inline
 
 ---
 
+### Immutable distros (Bazzite, Silverblue, SteamOS, etc.)
+
+If you're on an immutable or atomic Linux distro, use
+[Distrobox](https://distrobox.it/) instead of Docker. Your mic,
+speakers, and network are shared with the container automatically.
+
+```bash
+distrobox create --image debian:trixie --name partyline-i2p
+distrobox enter partyline-i2p
+```
+
+Once inside, grab the script and run it. First run installs
+dependencies (one-time, takes ~1 min):
+
+```bash
+curl -LO https://gitlab.com/MarcusHoltz/i2p-party-line/-/raw/main/i2p-party-line.sh
+chmod +x i2p-party-line.sh && ./i2p-party-line.sh
+```
+
+A ready-to-go image with everything pre-installed is also available
+from Docker Hub, GHCR, or GitLab CR:
+
+```bash
+# Docker Hub
+distrobox create --image marcusholtz/i2p-party-line-box:latest --name partyline-i2p
+
+# GitHub Container Registry
+distrobox create --image ghcr.io/marcusholtz/i2p-party-line-box:latest --name partyline-i2p
+
+# GitLab Container Registry
+distrobox create --image registry.gitlab.com/marcusholtz/i2p-party-line/box:latest --name partyline-i2p
+```
+
+Then enter and run:
+
+```bash
+distrobox enter partyline-i2p
+i2p-party-line.sh
+```
+
+> A `distrobox.ini` file is included in the repo for one-command
+> setup: `distrobox assemble create --file distrobox.ini`
+
+#### Where distrobox keeps your data
+
+The distrobox image stores persistent state in the XDG data directory on
+your **host** filesystem, following the same convention as Universal Blue
+images:
+
+```
+~/.local/share/i2p-party-line/
+├── config            saved options
+├── shared_secret     pre-shared secret (chmod 600)
+├── address           your I2P destination address
+└── partyline-keys.dat   destination key — the ONLY persistent transport state
+```
+
+The router's own netDb and peer profiles stay ephemeral under `run/` and
+are discarded on every start, matching the Docker image's behaviour.
+
+Distrobox bind-mounts your home, so this path is a real directory on your
+disk, not a container layer. Your address survives `distrobox rm` and
+container replacement, and travels with your home directory if you move it
+to another machine. Back up `partyline-keys.dat` — losing it means a new
+identity. Override the location with `DATA_DIR`:
+
+```bash
+DATA_DIR=/mnt/secure/i2p-party-line i2p-party-line.sh
+```
+
+
+---
+
 ### On first run
 
 1. ⏳ i2pd reseeds and builds tunnels — progress is shown on screen.

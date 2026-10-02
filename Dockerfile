@@ -76,5 +76,6 @@ COPY --chown=partyline:partyline i2p-party-line.sh /
 RUN chmod +x /i2p-party-line.sh
 
 ENV LANG=C.UTF-8
+ENV DOCKER_MODE=1
 
 ENTRYPOINT ["sh", "-c", "chown partyline:partyline /data /data/.partyline 2>/dev/null || true; exec setpriv --reuid=partyline --regid=partyline --init-groups /i2p-party-line.sh \"$@\"", "--"]

@@ -30,13 +30,12 @@ BASE_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 # MUST come before path assignments so all derived paths use the correct DATA_DIR.
 # Unlike the Tor edition there is no separate entrypoint: this script owns the
 # i2pd lifecycle in both modes, which is why there is only one file to ship.
-DOCKER_MODE=0
-[ -f /.dockerenv ] && DOCKER_MODE=1
+DOCKER_MODE="${DOCKER_MODE:-0}"
 
 if [ $DOCKER_MODE -eq 1 ]; then
     DATA_DIR="/data/.partyline"
 else
-    DATA_DIR="$BASE_DIR/data/script"
+    DATA_DIR="${DATA_DIR:-$BASE_DIR/data/script}"
 fi
 
 # i2pd's own data directory is DELIBERATELY EPHEMERAL (GARLIC_PLAN.md §6).
@@ -321,6 +320,11 @@ overwrite_rm() {
 }
 
 cleanup() {
+    # Capture the exit status before any command clobbers it. `set -e` aborts
+    # on the first failed command, then this trap still runs — so without this
+    # the failure is reported to the user as a successful shutdown.
+    local _exit_status=$?
+
     # Restore terminal
     if [ -n "$ORIGINAL_STTY" ]; then
         stty "$ORIGINAL_STTY" 2>/dev/null || true
@@ -334,7 +338,11 @@ cleanup() {
     overwrite_rm "$PTT_FLAG" "$CONNECTED_FLAG" "$MENU_FLAG" "$RECV_PIPE" "$SEND_PIPE"
     overwrite_rm -r "$AUDIO_DIR"
 
-    echo -e "\n${GREEN}${APP_NAME} shut down cleanly.${NC}"
+    if [ "$_exit_status" -eq 0 ]; then
+        echo -e "\n${GREEN}${APP_NAME} shut down cleanly.${NC}"
+    else
+        echo -e "\n${RED}${APP_NAME} exited with error (status $_exit_status).${NC}"
+    fi
 }
 
 kill_bg_processes() {
