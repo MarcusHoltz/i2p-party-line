@@ -39,6 +39,24 @@ Once inside the container:
 i2p-party-line.sh
 ```
 
+### Add to the application menu
+
+Optional. Once inside the container, run:
+
+```bash
+distrobox-export --app /usr/share/applications/i2p-party-line.desktop
+```
+
+Use the full path (`/usr/share/applications/tor-party-line.desktop`). 
+
+"I2P Party Line (on partyline-i2p)" appears in your host application menu with its own icon and opens in a terminal. Remove it with the same command plus `--delete`.
+
+To also run it from your host shell:
+
+```bash
+distrobox-export --bin /usr/local/bin/i2p-party-line.sh --export-path ~/.local/bin
+```
+
 ### Alternative registries
 
 ```bash
@@ -51,13 +69,15 @@ distrobox create --image registry.gitlab.com/marcusholtz/i2p-party-line/box:late
 
 ### One-command setup with distrobox.ini
 
-A `distrobox.ini` manifest is included in the [source repo](https://gitlab.com/MarcusHoltz/i2p-party-line). It creates the container and exports `i2p-party-line.sh` to `~/.local/bin`:
+A `distrobox.ini` manifest is included in the [source repo](https://gitlab.com/MarcusHoltz/i2p-party-line). It creates the container, exports `i2p-party-line.sh` to `~/.local/bin`, and adds no menu entries:
 
 ```bash
 distrobox assemble create --file distrobox.ini
 ```
 
 After assembly, run `i2p-party-line.sh` directly from your host shell.
+
+For an application menu (`.desktop`) entry, uncomment the `exported_apps` line in `distrobox.ini` before assembling, or use the `distrobox-export` command above.
 
 ## First Run
 

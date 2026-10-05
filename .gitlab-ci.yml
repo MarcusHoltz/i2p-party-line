@@ -184,6 +184,7 @@ build-and-smoke:
         command -v socat
         command -v openssl
         command -v pcm_rms
+        test -f /usr/share/applications/i2p-party-line.desktop
         echo "box-smoke-ok"
       '
   timeout: 30 minutes
